@@ -23,6 +23,9 @@ application-local.yml
 # Third-party course reference — not part of this project
 doc/
 
+# Scratch space for eyeballing LLM output in a browser
+.preview/
+
 # Frontend (later)
 node_modules/
 dist/
