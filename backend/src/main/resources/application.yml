@@ -19,6 +19,14 @@ spring:
       ddl-auto: update
     show-sql: true
     open-in-view: false
+  ai:
+    openai:
+      api-key: ${GROQ_API_KEY}
+      base-url: https://api.groq.com/openai/v1
+      chat:
+        options:
+          model: llama-3.3-70b-versatile
+          temperature: 0.3
 jwt:
   # No default on purpose: app must fail fast if the secret is not supplied
   # export JWT_SECRET_KEY="<at least 32 random chars>"

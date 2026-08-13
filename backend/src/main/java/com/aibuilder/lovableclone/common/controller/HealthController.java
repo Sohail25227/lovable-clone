@@ -3,10 +3,12 @@ package com.aibuilder.lovableclone.common.controller;
 import java.time.Instant;
 import java.util.Map;
 
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-
 /**
  * Pehla REST Controller.
  *
@@ -24,7 +26,14 @@ public class HealthController {
      *
      * Browser ya Postman se open karo — JSON milega.
      * Ye prove karta hai: server chal raha hai.
+     *
      */
+
+    private final ChatClient chatClient;
+
+    public HealthController(ChatClient chatClient) {
+        this.chatClient = chatClient;
+    }
     @GetMapping("/health")
     public Map<String, Object> health() {
         return Map.of(
@@ -45,4 +54,13 @@ public class HealthController {
                 "message", "Hello! AI App Builder backend ready."
         );
     }
+
+    @PostMapping("/ai-test")
+public Map<String, String> aiTest(@RequestBody Map<String, String> body) {
+    String answer = chatClient.prompt()
+            .user(body.get("message"))
+            .call()
+            .content();
+    return Map.of("answer", answer);
+}
 }

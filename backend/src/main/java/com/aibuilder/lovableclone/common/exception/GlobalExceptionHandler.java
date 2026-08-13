@@ -50,6 +50,8 @@ public class GlobalExceptionHandler {
     // Koi bhi unexpected exception — last safety net
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiErrorDto> handleUnexpected(Exception ex) {
+        // Generic message to the client, full detail in the logs
+        log.error("Unexpected error", ex);
         return build(HttpStatus.INTERNAL_SERVER_ERROR, "Something went wrong");
     }
     // Common builder — DRY
