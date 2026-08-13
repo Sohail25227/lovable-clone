@@ -1,0 +1,22 @@
+# Day 2 ke liye ready — aaj Docker install karna homework hai
+# Command: docker compose up -d
+#
+# Kyun Docker?
+# Local machine pe PostgreSQL manually install karne se better:
+# ek command se DB start, project delete = data clean
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lovable-postgres
+    ports:
+      - "5432:5432"          # host:container → localhost:5432
+    environment:
+      POSTGRES_DB: aibuilder
+      POSTGRES_USER: aibuilder
+      POSTGRES_PASSWORD: aibuilder123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data   # data restart pe bhi rahe
+
+volumes:
+  postgres_data:

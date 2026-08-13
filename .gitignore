@@ -1,0 +1,28 @@
+# Build output
+target/
+build/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Secrets / local overrides
+.env
+application-local.yml
+
+# Third-party course reference — not part of this project
+doc/
+
+# Frontend (later)
+node_modules/
+dist/
