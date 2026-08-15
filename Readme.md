@@ -22,16 +22,18 @@ monolith to microservices.
 | 6c | Live preview: generated apps run in the browser | Done |
 | 6d | Prompt history, follow-up prompts refining an existing app | Done |
 | 6e | Generation interlock, bounded retry budget | Done |
-| 7+ | File storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
+| 7 | React frontend: auth, projects, builder with live preview | Done |
+| 8+ | Flyway, deploy, file storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
 
 ## Stack
 
 **Current:** Java 17 · Spring Boot 4.0.0 · Spring Security · Spring Data JPA ·
-PostgreSQL 16 · JJWT · Spring AI 2.0 · Groq (Llama 3.3 70B) · Docker Compose
+PostgreSQL 16 · JJWT · Spring AI 2.0 · Groq (Llama 3.3 70B) · Docker Compose ·
+React 19 · Vite 8 · Tailwind 4 · React Router 7
 
-**Planned:** Redis · MinIO · Qdrant · React + Vite · Kubernetes (k3s)
+**Planned:** Flyway · Redis · MinIO · Qdrant · Kubernetes (k3s)
 
 Groq is reached through the OpenAI-compatible starter, so the provider is a
 `base-url` change rather than a code change.
@@ -90,6 +92,26 @@ Hibernate runs with `ddl-auto: update`, so tables are created on first boot.
 > caught mid-write can leave a truncated `.class` file. Maven then skips it,
 > because its incremental check compares timestamps rather than content, and
 > the build stays green. `javap -p target/classes/...` shows the truth.
+
+### 4. Run the frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+UI on **http://localhost:5173**. No dev proxy: the browser talks to the backend
+cross-origin, so CORS is exercised in development rather than discovered in
+production. The port is pinned with `strictPort`, because the backend allows exactly
+one origin and a silent fallback to `5174` would surface as a confusing CORS failure.
+
+Both sides read the same origin from one place. Change it and change both:
+
+```bash
+export FRONTEND_ORIGIN="http://localhost:5173"   # backend: CORS + preview frame-ancestors
+# frontend/.env → VITE_API_BASE_URL=http://localhost:8081
+```
 
 ---
 
@@ -162,7 +184,9 @@ accent colour purple instead of blue" on a todo app kept add, complete, delete a
 
 A second `generate` on a project that is already generating returns **409** in
 tens of milliseconds, without calling the model. A write that races another write
-returns **409** too (see optimistic locking below).
+returns **409** too (see optimistic locking below). When the provider's rate limit is
+hit — routine on a free tier — the answer is **429** carrying the wait taken from the
+provider's `retry-after`, not a `500`.
 
 Errors return a consistent shape:
 
@@ -218,7 +242,12 @@ Lovable_Clone/
 │       ├── generation/   ← LLM calls, output validation, generated files, chat history
 │       └── common/       ← security, config, exceptions
 ├── docker-compose.yml    ← PostgreSQL
-├── frontend/             ← React (not started)
+├── frontend/
+│   └── src/
+│       ├── api/          ← fetch wrapper, bearer token, error mapping
+│       ├── auth/         ← session context
+│       ├── pages/        ← login, projects, builder
+│       └── components/   ← shared UI
 └── doc/                  ← third-party course reference, not part of the build
 ```
 
@@ -314,34 +343,57 @@ claim's `where` clause removes a query and the window between checking and actin
 Verified: another user's `generate` on someone's project answers 404 and records no
 prompt, because the claim fails before anything is written.
 
-**Retry is configuration, and its two failure modes are both silent.** The README
-used to claim Spring AI retried `429`s out of the box. Both halves were wrong, and
-reading the jars is what settled it. `SpringAiRetryAutoConfiguration` is
-`@ConditionalOnClass(RetryUtils)`, and `RetryUtils` ships in `spring-ai-retry`,
-which Spring AI 2.0 makes an *optional* dependency of the starter. It was not on the
-classpath, the condition failed quietly, the app booted fine, and nothing was ever
-retried — not even a `502` from the provider.
+**Retry is configuration on the wrong prefix, and it fails without a symptom.** This
+one took two wrong answers before the evidence settled it, and both wrong answers
+looked right at the time.
 
-Adding the dependency is not enough either. The property-aware error handler checks
-`on-http-codes` first, then treats any remaining `4xx` as non-transient, and
-`on-client-errors` defaults to `false`. `429` is a `4xx`, so a rate limit failed
-without a single retry unless it is opted in explicitly:
+The README first claimed Spring AI retried `429`s out of the box. It then claimed the
+opposite: that `spring-ai-retry` was an optional dependency missing from the
+classpath, so nothing was retried, and that adding it plus
+`spring.ai.retry.on-http-codes: [429]` fixed it. That reasoning about
+`SpringAiRetryAutoConfiguration` is accurate in isolation, and the wired
+`RetryTemplate` was real. It simply has nothing to do with this application.
 
-```yaml
-spring.ai.retry.on-http-codes: [429]
+A live `429` proved it. The provider's daily token limit ran out mid-testing, and the
+call failed in **0.6 s** with `com.openai.errors.RateLimitException` — no retry, no
+backoff, and no Spring frame anywhere in the stack. Spring AI 2.0's OpenAI path goes
+through the official `openai-java` SDK over OkHttp, not Spring's `RestClient`:
+
+```
+javac -p OpenAiChatAutoConfiguration.class
+  → openAiChatModel(OpenAiCommonProperties, OpenAiChatProperties, ToolCallingManager, …)
 ```
 
-The defaults that do apply are sized for a batch job: 10 attempts, 2 s initial
-backoff, multiplier 5, capped at 3 minutes — worst case roughly 19 minutes with a
-request thread held the whole time. `generate` is synchronous, so the budget is cut
-to 3 attempts and a 4 s cap: at most 3 s of added sleep. Combined with the one
-validation retry that is 6 model calls worst case, which is the ceiling worth
-having until generation moves to a background job.
+No `RetryTemplate` parameter, no `ResponseErrorHandler`. `spring.ai.retry.*` cannot
+reach this model, so that whole block was configuration that read as load-bearing and
+did nothing. It was removed along with the dependency. The knob that exists is the
+SDK's, and it was already retrying with sane defaults — 3 attempts, 60 s timeout:
 
-`RetryConfigTest` pins all three facts against the real `application.yml`, because
-each of them fails without a symptom: drop the jar and retry disappears, drop the
-`429` line and rate limits stop being retried, widen the budget and a thread blocks
-for a quarter of an hour.
+```yaml
+spring.ai.openai:
+  max-retries: 2
+  timeout: 45s
+```
+
+Both are tightened because `generate` is synchronous and the validation retry sits on
+top: the default worst case is about 3 minutes of a held request thread, and this
+caps a single validation attempt near 90 s. `RetryConfigTest` pins these against the
+real `application.yml` — flip the expected value and it fails, which is the only proof
+that the yml is being read rather than a default.
+
+The lesson generalises past retry: a property that binds is not a property that acts.
+Both wrong answers came from reading configuration and framework source; only calling
+the provider and watching the clock distinguished them.
+
+**A `429` is not a `500`.** Left alone, the SDK's `RateLimitException` reached the
+catch-all and became "Something went wrong", which is a lie — the request was fine and
+would succeed later. It is translated at the boundary of the generation service into a
+`ModelRateLimitedException` and answered as **429**, so the SDK type stays out of the
+web layer, the same way the JPA exception does. The wait comes from the `retry-after`
+header rather than the provider's prose, since that message is the only reliable place
+the delay appears, and it carries the organisation id, which is logged and not
+returned. The UI then shows something a user can act on: *"The AI provider's rate limit
+was reached. Try again in about 31 minutes."*
 
 **History is append-only, and separate from the code.** `ChatMessageEntity` has no
 `updatedAt` and its `createdAt` is `updatable = false` — history that can be edited
@@ -454,12 +506,54 @@ transaction, the model is called outside one.
 `generation` reaches `workspace` through `ProjectService`. A service call can
 become an HTTP call during a service split; a repository call cannot.
 
+**The frontend is a separate origin on purpose, and that closes a security gap.**
+A Vite dev proxy would have been less work and would have served the preview from
+`localhost:5173`, the same origin as the UI. Generated code would then have shared an
+origin with the session token. Talking to the backend cross-origin instead puts every
+generated app on the backend's origin, where the browser's same-origin policy — not our
+CSP — stops it from reaching the app's DOM or `localStorage`. The gap that remains is
+narrower: projects still share an origin with each other, so a per-project preview
+origin is still the real fix.
+
+It also means CORS is exercised from the first request rather than discovered at
+deploy time. One property, `app.frontend-origin`, feeds both the allowed origin and the
+preview's `frame-ancestors`, because they are the same fact and drift if written twice.
+The origin is named rather than `*`, and `allowCredentials` is off: the token travels in
+an `Authorization` header, so permitting cookies would only open a CSRF path that
+stateless JWT does not otherwise have.
+
+**Spring Security blocks its own preview by default.** `X-Frame-Options: DENY` is on
+every response, and `DENY` refuses framing even same-origin, so the iframe rendered
+nothing while the network tab showed `200`s. The header cannot be varied per path within
+one filter chain, so preview gets its own chain matched on `/api/preview/**` with frame
+options disabled, and the API keeps `DENY`. `frame-ancestors` in the preview CSP replaces
+it, which is strictly better: it can name the frontend origin, while `X-Frame-Options`
+only understands "nobody" and "same origin".
+
+The iframe is additionally sandboxed to `allow-scripts allow-same-origin allow-forms`.
+`allow-same-origin` looks wrong at a glance and is required: without it the frame gets an
+opaque origin, `localStorage` throws, and every generated app dies in its `useState`
+initialiser — the contract tells the model to persist there. It grants nothing against
+this app, which is a different origin either way, and what the sandbox does buy is that
+generated code cannot navigate the top-level tab.
+
+**The token is in `localStorage`, knowingly.** An httpOnly cookie resists XSS better,
+but needs credentialed CORS and CSRF handling, which the stateless design deliberately
+avoids. The trade is acceptable here mainly because of the origin split above: the
+untrusted code this product exists to run cannot read that key.
+
+**The UI shows the server's message rather than its own.** Error copy is not mapped by
+status code, because the useful part is what the backend already said — the rate-limit
+wait, or which contract rules the model broke. A generic "Something went wrong" per
+status would discard exactly the information the user needs.
+
 ---
 
 ## Known gaps
 
-- `GeneratedAppValidator` and the retry configuration are the only tested things;
-  no controller, service or repository has a test
+- `GeneratedAppValidator` and the model retry configuration are the only tested
+  things; no controller, service or repository has a test, and the frontend has none
+  at all
 - Every preview shares one origin, so generated apps share `localStorage`. A
   regenerated counter opened at 1 instead of 0, having inherited the previous
   app's saved state. Per-project origins are the fix, and they are also what
@@ -488,8 +582,12 @@ become an HTTP call during a service split; a repository call cannot.
   not asked to change. One measured turn kept 98.5% of `app.jsx` and left
   `index.html` byte-identical, but nothing enforces it: the validator checks that
   the app runs, not that last turn's features survived
-- Generation is synchronous, so a request thread is held for the whole model call.
-  Retry is bounded now, but the real fix is a job queue with the client polling
+- Generation is synchronous, so a request thread is held for the whole model call and
+  the UI can only sit on a spinner. Retry is bounded now, but the real fix is a job
+  queue with the client polling — which is also what would let `GENERATING` mean
+  anything useful in the interface
+- The UI never refreshes on its own. If a project is left `GENERATING` by another
+  tab or a killed process, the page keeps showing that until it is reloaded
 - `generate` is not idempotent — a retried HTTP request bills a fresh generation.
   An idempotency key would fix it
 - Schema changes to populated tables have to be applied by hand. Adding the
@@ -497,7 +595,10 @@ become an HTTP call during a service split; a repository call cannot.
   null default 0` first, because `ddl-auto: update` emits it without a default
   and Postgres rejects that on a non-empty table. This is the concrete cost of
   the missing migration tool below
-- `ddl-auto: update` instead of a migration tool (Flyway/Liquibase)
-- No refresh tokens or token revocation
+- `ddl-auto: update` instead of a migration tool (Flyway/Liquibase). This is the one
+  blocker for deploying: letting Hibernate alter a production schema is not an option
+- No refresh tokens or token revocation, so an expired token means a silent bounce to
+  the login screen mid-session
 - No rate limiting on auth endpoints
-- CORS not configured (needed once the frontend exists)
+- The frontend is dev-only: `npm run build` produces a bundle, but nothing serves it,
+  and `VITE_API_BASE_URL` is baked in at build time rather than read at runtime
