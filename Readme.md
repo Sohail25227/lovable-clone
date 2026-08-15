@@ -509,6 +509,27 @@ pure function, so its reject paths can be proven without spending a model call �
 which an end-to-end test can never do reliably, since a good reply never
 exercises them.
 
+**The sandbox has no network, and the model has to be told.** A generated weather
+app fetched `api.openweathermap.org` with `appid=YOUR_API_KEY`, wrote no `.catch`,
+and rendered `Temperature: °C` forever. Every layer failed quietly: the key was a
+placeholder, `connect-src 'self'` blocked the request before it left the browser,
+and the rejected promise went nowhere. Nothing crashed, so nothing was reported.
+
+The gap was in the contract, not the reply. The prompt described what to build and
+never described where it runs, so the model assumed the usual: a page with internet
+access and secrets. It has neither. The prompt now says so and asks for sample data
+when a request implies live data, and the validator rejects `fetch`, `XMLHttpRequest`,
+`axios` and placeholder keys — because a prompt rule is a request, and this failure
+is invisible rather than loud. A sample-data version of the same app still passes;
+both cases are unit tested, so the rule cannot quietly start rejecting every app.
+
+**A rate limit is not a failed generation.** The catch-all marked the project
+`FAILED` on any exception, so hitting the free tier's daily quota badged a project
+whose files were intact and whose preview still worked. The generation never
+started. `ModelRateLimitedException` now releases the claim instead: back to `READY`
+if files exist, `DRAFT` if not, inferred from the files rather than remembered,
+since that is what the status describes.
+
 **Response validity is enforced by the provider, not requested in the prompt.**
 Asking the model to escape a code payload into JSON strings failed
 intermittently — one unescaped quote inside JSX ends the string and the parse
@@ -621,6 +642,11 @@ status would discard exactly the information the user needs.
   tab or a killed process, the page keeps showing that until it is reloaded
 - `generate` is not idempotent — a retried HTTP request bills a fresh generation.
   An idempotency key would fix it
+- Generated apps cannot reach the network at all, so "show me live prices" becomes a
+  sample-data app. Opening `connect-src` to public keyless APIs would make those
+  requests real, but it also lets model-written code talk to the internet from the
+  user's browser — an allow-list of hosts is the shape of the answer, and it is not
+  built
 - Migrations are only ever applied forward. There is no `undo` (that is Flyway's paid
   tier), so a bad migration is fixed by writing the next one
 - No refresh tokens or token revocation, so an expired token means a silent bounce to

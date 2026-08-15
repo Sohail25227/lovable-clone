@@ -56,6 +56,12 @@ public class CodeGenerationService {
             - When the collection is empty, render a short friendly message instead of the list
             - Give every item in a list its own li element
             - Use only browser-native APIs. No import statements, no npm packages, no build step
+            - The page runs with no network access and no secrets. Never call fetch or
+              XMLHttpRequest, and never reference an API key. Requests are blocked by the
+              sandbox, so an app that depends on one shows the user nothing at all
+            - When the request implies live data, such as weather or prices, put realistic
+              sample data in a constant in app.jsx and read from that. Say it is sample data
+              somewhere visible, so the user is not misled
 
             styles.css holds only rules that Tailwind cannot express, and may be nearly empty.
 
@@ -119,6 +125,13 @@ public class CodeGenerationService {
             projectService.updateStatus(projectId, ownerId, ProjectStatusEnum.READY);
             return app;
 
+        } catch (ModelRateLimitedException ex) {
+            // Rate limit mein generation fail nahi hui — woh shuru hi nahi hui. Purani files
+            // jaisi thi waisi hain aur preview abhi bhi chalti hai, isliye FAILED dikhana jhoot
+            // hota. Jahan se claim kiya tha wahin wapas chhod dete hain
+            releaseClaim(projectId, ownerId, ex);
+            throw ex;
+
         } catch (RuntimeException ex) {
             markFailed(projectId, ownerId, ex);
             throw ex;
@@ -161,6 +174,28 @@ public class CodeGenerationService {
         }
 
         return context.toString();
+    }
+
+    /**
+     * Claim wapas chhodta hai bina project ko FAILED kiye.
+     *
+     * Purana status yaad rakhne ke bajaye files se nikala jata hai, kyunki status batata hi
+     * yeh hai ki abhi kya maujood hai: files hain to app chal rahi hai (READY), nahi hain to
+     * project waisa hi khali hai jaisa bana tha (DRAFT). Isse ek purana FAILED bhi saaf ho
+     * jata hai — theek hai, kyunki ab na kuch toota hua hai na kuch chal raha hai.
+     */
+    private void releaseClaim(Long projectId, Long ownerId, RuntimeException cause) {
+        try {
+            ProjectStatusEnum released = generatedFileService.getFiles(projectId, ownerId).isEmpty()
+                    ? ProjectStatusEnum.DRAFT
+                    : ProjectStatusEnum.READY;
+
+            projectService.updateStatus(projectId, ownerId, released);
+
+        } catch (RuntimeException whileReleasing) {
+            // markFailed jaisa hi: cleanup ki failure asli wajah ko nigalni nahi chahiye
+            cause.addSuppressed(whileReleasing);
+        }
     }
 
     private void markFailed(Long projectId, Long ownerId, RuntimeException cause) {

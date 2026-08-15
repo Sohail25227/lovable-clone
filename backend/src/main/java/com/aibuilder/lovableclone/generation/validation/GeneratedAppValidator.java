@@ -29,6 +29,16 @@ public class GeneratedAppValidator {
     private static final Pattern APP_COMPONENT = Pattern.compile("function\\s+App\\b|(?:const|let|var)\\s+App\\s*=");
     private static final Pattern ES_IMPORT = Pattern.compile("(?m)^\\s*import\\s");
 
+    // Preview ka CSP connect-src 'self' rakhta hai, to yeh call browser chhodti hi nahi.
+    // Model bina bataye maan leta hai ki uske paas internet hai — ek weather app
+    // openweathermap ko fetch kar rahi thi aur user ko sirf "Temperature: °C" dikhta tha
+    private static final Pattern NETWORK_CALL =
+            Pattern.compile("\\bfetch\\s*\\(|\\bXMLHttpRequest\\b|\\baxios\\b|navigator\\.sendBeacon");
+
+    // Placeholder key ka matlab hai model ne aisi app likhi hai jo bina uske chal hi nahi sakti
+    private static final Pattern PLACEHOLDER_KEY =
+            Pattern.compile("(?i)YOUR[_-]?(API[_-]?)?KEY|<your[^>]*key|api[_-]?key\\s*[:=]\\s*[\"'][^\"']*[\"']");
+
     // Khaali list ka matlab output chalne layak hai
     public List<String> validate(GeneratedAppDto app) {
         List<String> violations = new ArrayList<>();
@@ -145,6 +155,14 @@ public class GeneratedAppValidator {
         }
         if (!APP_COMPONENT.matcher(jsx).find()) {
             violations.add("app.jsx does not define a component named App");
+        }
+        if (NETWORK_CALL.matcher(jsx).find()) {
+            violations.add("app.jsx makes a network request, which the preview sandbox blocks. "
+                    + "Put realistic sample data in a constant and read from that instead");
+        }
+        if (PLACEHOLDER_KEY.matcher(jsx).find()) {
+            violations.add("app.jsx expects an API key, which the app will never have. "
+                    + "Build it against sample data instead");
         }
     }
 }

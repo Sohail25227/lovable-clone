@@ -57,6 +57,37 @@ class GeneratedAppValidatorTest {
                 .anyMatch(violation -> violation.contains("ReactDom"));
     }
 
+    /**
+     * Yeh bhi asli defect hai, aur pehle wale se zyada khatarnak — kyunki dikhta nahi.
+     *
+     * Ek weather app ne openweathermap ko fetch kiya, catch nahi lagaya, aur CSP ne request
+     * rok di. Page load hua, kuch crash nahi hua, bas "Temperature: °C" khaali baitha raha.
+     * Sirf prompt is par bharosa laayak nahi: model ka default yahi hai ki uske paas internet hai
+     */
+    @Test
+    void rejectsAnAppThatNeedsTheNetwork() {
+        String jsx = VALID_JSX.replace("return <p>hi</p>;", """
+                const [temp, setTemp] = React.useState('');
+                  fetch('https://api.openweathermap.org/data/2.5/weather?appid=YOUR_API_KEY')
+                    .then(r => r.json())
+                    .then(d => setTemp(d.main.temp));
+                  return <p>{temp}</p>;""");
+
+        assertThat(validator.validate(app(VALID_HTML, jsx, "")))
+                .anyMatch(violation -> violation.contains("network request"))
+                .anyMatch(violation -> violation.contains("API key"));
+    }
+
+    // Sample data wali app pass honi chahiye, warna naya rule har weather app hi reject kar dega
+    @Test
+    void acceptsTheSameAppBuiltOnSampleData() {
+        String jsx = VALID_JSX.replace("return <p>hi</p>;", """
+                const SAMPLE = { Mumbai: 31, Delhi: 28 };
+                  return <p>{SAMPLE.Mumbai}°C (sample data)</p>;""");
+
+        assertThat(validator.validate(app(VALID_HTML, jsx, ""))).isEmpty();
+    }
+
     @Test
     void rejectsTailwindLoadedAsAStylesheet() {
         String html = VALID_HTML.replace(
