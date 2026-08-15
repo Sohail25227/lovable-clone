@@ -3,16 +3,29 @@ const STATUS_STYLES = {
   GENERATING: 'bg-amber-500/15 text-amber-300',
   READY: 'bg-emerald-500/15 text-emerald-300',
   FAILED: 'bg-rose-500/15 text-rose-300',
+  LAST_ATTEMPT_FAILED: 'bg-amber-500/15 text-amber-300',
 }
 
-export function StatusBadge({ status }) {
+/**
+ * FAILED ka matlab hai "pichhli koshish nahi chali", na ki "app tooti hui hai" — generation
+ * fail hone par purani files zinda rehti hain aur preview chalti rehti hai.
+ *
+ * Isliye jahan files maujood hain wahan red FAILED galat hai: screen ek taraf app dikhata
+ * hai aur doosri taraf kehta hai ki woh fail ho gayi. Jinke paas files hi nahi, unke liye
+ * FAILED sach hai aur waisa hi rehta hai
+ */
+export function StatusBadge({ status, hasFiles = false }) {
+  const attemptFailed = status === 'FAILED' && hasFiles
+  const label = attemptFailed ? 'LAST ATTEMPT FAILED' : status
+  const style = attemptFailed ? STATUS_STYLES.LAST_ATTEMPT_FAILED : STATUS_STYLES[status]
+
   return (
     <span
       className={`rounded-full px-2.5 py-1 text-xs font-medium tracking-wide ${
-        STATUS_STYLES[status] ?? STATUS_STYLES.DRAFT
+        style ?? STATUS_STYLES.DRAFT
       }`}
     >
-      {status}
+      {label}
     </span>
   )
 }

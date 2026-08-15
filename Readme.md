@@ -523,6 +523,19 @@ when a request implies live data, and the validator rejects `fetch`, `XMLHttpReq
 is invisible rather than loud. A sample-data version of the same app still passes;
 both cases are unit tested, so the rule cannot quietly start rejecting every app.
 
+**The badge and the preview must not contradict each other.** A red `FAILED` sat
+above a weather app that was visibly running. Both were telling the truth —
+`FAILED` means the last attempt failed, and the previous files survive a failure —
+but read together they say the app is broken when it is not. In the builder, where
+the preview is on screen, `FAILED` with files present now reads `LAST ATTEMPT
+FAILED` in amber; with no files it stays red, because then it is simply true.
+
+The same screen was also stale: the badge is fetched once on mount, so it kept
+saying `FAILED` after the status had already changed. The builder now refetches the
+project on focus. Only the project — refreshing files would mint a new preview token
+and remount the iframe, throwing away the generated app's own state on every tab
+switch.
+
 **A rate limit is not a failed generation.** The catch-all marked the project
 `FAILED` on any exception, so hitting the free tier's daily quota badged a project
 whose files were intact and whose preview still worked. The generation never
@@ -638,8 +651,9 @@ status would discard exactly the information the user needs.
   the UI can only sit on a spinner. Retry is bounded now, but the real fix is a job
   queue with the client polling — which is also what would let `GENERATING` mean
   anything useful in the interface
-- The UI never refreshes on its own. If a project is left `GENERATING` by another
-  tab or a killed process, the page keeps showing that until it is reloaded
+- The builder refetches the project on focus, so the badge corrects itself, but files
+  and preview still only load on mount. A project regenerated in another tab shows its
+  new status next to its old code until the page is reloaded
 - `generate` is not idempotent — a retried HTTP request bills a fresh generation.
   An idempotency key would fix it
 - Generated apps cannot reach the network at all, so "show me live prices" becomes a

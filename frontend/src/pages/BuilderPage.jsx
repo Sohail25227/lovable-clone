@@ -54,6 +54,33 @@ export default function BuilderPage() {
     load()
   }, [load])
 
+  /**
+   * Page mount pe ek baar padhta hai, to badge utna hi purana ho jata hai jitni der tab
+   * khuli rehti hai. Yahan sirf project dobara mangaya jata hai, files ya preview nahi:
+   * naya preview token iframe ko dobara mount karwa deta, aur generated app ka apna
+   * state har tab switch pe udd jata.
+   */
+  useEffect(() => {
+    const refreshStatus = async () => {
+      if (document.visibilityState !== 'visible') return
+
+      try {
+        setProject(await api.getProject(projectId))
+      } catch {
+        // Background refresh chup chaap fail hoti hai. User ne kuch maanga nahi tha,
+        // aur uske saamne error rakhna sirf shor hai — agli asli action pe dikh jayega
+      }
+    }
+
+    window.addEventListener('focus', refreshStatus)
+    document.addEventListener('visibilitychange', refreshStatus)
+
+    return () => {
+      window.removeEventListener('focus', refreshStatus)
+      document.removeEventListener('visibilitychange', refreshStatus)
+    }
+  }, [projectId])
+
   async function generate(event) {
     event.preventDefault()
     setError(null)
@@ -89,7 +116,7 @@ export default function BuilderPage() {
           ← Projects
         </Link>
         <h1 className="flex-1 truncate font-medium text-slate-100">{project.name}</h1>
-        <StatusBadge status={project.status} />
+        <StatusBadge status={project.status} hasFiles={files.length > 0} />
       </header>
 
       <div className="flex min-h-0 flex-1">
