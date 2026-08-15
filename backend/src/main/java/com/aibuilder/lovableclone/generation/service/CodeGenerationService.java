@@ -8,6 +8,7 @@ import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.stereotype.Service;
 
 import com.aibuilder.lovableclone.generation.dto.GeneratedAppDto;
+import com.aibuilder.lovableclone.workspace.entity.ProjectStatusEnum;
 import com.aibuilder.lovableclone.workspace.service.ProjectService;
 
 @Service
@@ -53,16 +54,45 @@ public class CodeGenerationService {
 
     private final ChatClient chatClient;
     private final ProjectService projectService;
+    private final GeneratedFileService generatedFileService;
 
-    public CodeGenerationService(ChatClient chatClient, ProjectService projectService) {
+    public CodeGenerationService(ChatClient chatClient,
+                                 ProjectService projectService,
+                                 GeneratedFileService generatedFileService) {
         this.chatClient = chatClient;
         this.projectService = projectService;
+        this.generatedFileService = generatedFileService;
     }
 
     public GeneratedAppDto generateForProject(Long projectId, Long ownerId, String prompt) {
         // Ownership check. Project nahi mila ya tumhara nahi to yahi 404 fenk dega
         projectService.getProjectById(projectId, ownerId);
 
+        // Apne transaction mein commit hota hai, taaki LLM fail hone pe bhi zinda rahe
+        projectService.updateStatus(projectId, ownerId, ProjectStatusEnum.GENERATING);
+
+        try {
+            GeneratedAppDto app = callModel(projectId, prompt);
+            generatedFileService.replaceFiles(projectId, app);
+            projectService.updateStatus(projectId, ownerId, ProjectStatusEnum.READY);
+            return app;
+
+        } catch (RuntimeException ex) {
+            markFailed(projectId, ownerId, ex);
+            throw ex;
+        }
+    }
+
+    private void markFailed(Long projectId, Long ownerId, RuntimeException cause) {
+        try {
+            projectService.updateStatus(projectId, ownerId, ProjectStatusEnum.FAILED);
+        } catch (RuntimeException whileMarking) {
+            // Cleanup ki apni failure asli wajah ko nigalni nahi chahiye
+            cause.addSuppressed(whileMarking);
+        }
+    }
+
+    private GeneratedAppDto callModel(Long projectId, String prompt) {
         log.info("Generating app for project {}", projectId);
         long startedAt = System.currentTimeMillis();
 

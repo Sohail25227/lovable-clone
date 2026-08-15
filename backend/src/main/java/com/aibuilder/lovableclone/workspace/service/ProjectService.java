@@ -9,6 +9,7 @@ import com.aibuilder.lovableclone.common.exception.ResourceNotFoundException;
 import com.aibuilder.lovableclone.workspace.dto.CreateProjectRequestDto;
 import com.aibuilder.lovableclone.workspace.dto.ProjectResponseDto;
 import com.aibuilder.lovableclone.workspace.entity.ProjectEntity;
+import com.aibuilder.lovableclone.workspace.entity.ProjectStatusEnum;
 import com.aibuilder.lovableclone.workspace.repository.ProjectRepository;
 
 @Service
@@ -65,5 +66,14 @@ public class ProjectService {
                 project.getCreatedAt(),
                 project.getUpdatedAt()
         );
+    }
+
+    @Transactional
+    public void updateStatus(Long projectId, Long ownerId, ProjectStatusEnum status) {
+        ProjectEntity project = projectRepository.findByIdAndOwnerId(projectId, ownerId)
+                .orElseThrow(() -> new ResourceNotFoundException("Project not found"));
+
+        project.setStatus(status);
+        // save() ki zarurat nahi — managed entity hai, commit pe dirty checking likh degi
     }
 }
