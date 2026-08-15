@@ -20,7 +20,8 @@ monolith to microservices.
 | 6 | Persist generated files, status transitions, optimistic locking | Done |
 | 6b | Validate generated output, retry once on violations | Done |
 | 6c | Live preview: generated apps run in the browser | Done |
-| 6d | Prompt history, follow-up prompts | Next |
+| 6d | Prompt history, follow-up prompts refining an existing app | Done |
+| 6e | Generation interlock, bounded retry budget | Done |
 | 7+ | File storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
@@ -117,6 +118,7 @@ Send `Authorization: Bearer <token>`.
 | `DELETE` | `/api/projects/{id}` | Delete project (`204`) |
 | `POST` | `/api/projects/{id}/generate` | Prompt → generated app (`200`) |
 | `GET` | `/api/projects/{id}/files` | Stored files for a project |
+| `GET` | `/api/projects/{id}/messages` | Prompt history, oldest first |
 | `POST` | `/api/projects/{id}/preview-token` | Mint a 30-minute preview URL |
 
 ### Preview
@@ -151,8 +153,16 @@ project's status moves `DRAFT → GENERATING → READY`, or to `FAILED` if the m
 call throws or its output is unusable after the retry — that case answers **502**
 with the violations listed.
 
-A write that races another write on the same project returns **409** instead of
-silently overwriting it (see optimistic locking below).
+**The same endpoint refines.** Call `generate` again on a project that already has
+files and the prompt is treated as a change to the running app rather than a fresh
+build: the current files and the recent prompt history go in with it. "Make the
+accent colour purple instead of blue" on a todo app kept add, complete, delete and
+`localStorage` intact, left `index.html` byte-identical, and altered 1.5% of
+`app.jsx`. Every prompt and reply summary is appended to `GET /messages`.
+
+A second `generate` on a project that is already generating returns **409** in
+tens of milliseconds, without calling the model. A write that races another write
+returns **409** too (see optimistic locking below).
 
 Errors return a consistent shape:
 
@@ -184,6 +194,12 @@ curl -s -X POST "localhost:8081/api/projects/$PROJECT_ID/generate" \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"A todo app with add, complete, filter and delete."}'
 
+# Refine it — same endpoint, and the existing app goes in as context
+curl -s -X POST "localhost:8081/api/projects/$PROJECT_ID/generate" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Make the accent colour purple instead of blue."}'
+
 # Then open the app in a browser
 curl -s -X POST "localhost:8081/api/projects/$PROJECT_ID/preview-token" \
   -H "Authorization: Bearer $TOKEN"
@@ -199,7 +215,7 @@ Lovable_Clone/
 │   └── src/main/java/com/aibuilder/lovableclone/
 │       ├── account/      ← users, auth
 │       ├── workspace/    ← projects
-│       ├── generation/   ← prompts, LLM calls, output validation, generated apps
+│       ├── generation/   ← LLM calls, output validation, generated files, chat history
 │       └── common/       ← security, config, exceptions
 ├── docker-compose.yml    ← PostgreSQL
 ├── frontend/             ← React (not started)
@@ -268,6 +284,86 @@ exceptions to status codes and returns a uniform `ApiErrorDto`. Unexpected
 exceptions are logged with a stack trace but respond with a generic message,
 so internals never leak to clients.
 
+**Optimistic locking makes writes safe; it is not an interlock.** Two `generate`
+calls on one project each ran their status update in a separate short transaction,
+so both wrote `GENERATING` legitimately, both called the model, and the free tier
+paid twice. Versioning cannot help here, because neither write is stale — they are
+sequential, just pointless. The fix is to make claiming the project a decision the
+database takes:
+
+```sql
+update projects set status = 'GENERATING', updated_at = ?, version = version + 1
+ where id = ? and owner_id = ? and status <> 'GENERATING'
+```
+
+The affected row count is the answer: `1` means this caller won and may spend a
+model call, `0` means it did not. Two concurrent `generate` calls now come back as
+one `200` and one `409` after 46 ms — the loser is turned away before the expensive
+work, not after. Zero rows is ambiguous between "already generating" and "not
+yours", so a follow-up read separates them and a stranger still gets **404**, never
+a 409 that would confirm the project exists.
+
+Two details a bulk update gets wrong by default, both silent. `@PreUpdate` does not
+fire, so `updatedAt` is set in the statement. And Hibernate does not touch `version`,
+which is exactly the hole documented above — a writer outside the protocol lets a
+stale entity elsewhere still look fresh, so the increment is written by hand.
+
+**Ownership and interlock in one statement, not two.** The owner check used to be a
+separate `getProjectById` before the status update. Folding `owner_id` into the
+claim's `where` clause removes a query and the window between checking and acting.
+Verified: another user's `generate` on someone's project answers 404 and records no
+prompt, because the claim fails before anything is written.
+
+**Retry is configuration, and its two failure modes are both silent.** The README
+used to claim Spring AI retried `429`s out of the box. Both halves were wrong, and
+reading the jars is what settled it. `SpringAiRetryAutoConfiguration` is
+`@ConditionalOnClass(RetryUtils)`, and `RetryUtils` ships in `spring-ai-retry`,
+which Spring AI 2.0 makes an *optional* dependency of the starter. It was not on the
+classpath, the condition failed quietly, the app booted fine, and nothing was ever
+retried — not even a `502` from the provider.
+
+Adding the dependency is not enough either. The property-aware error handler checks
+`on-http-codes` first, then treats any remaining `4xx` as non-transient, and
+`on-client-errors` defaults to `false`. `429` is a `4xx`, so a rate limit failed
+without a single retry unless it is opted in explicitly:
+
+```yaml
+spring.ai.retry.on-http-codes: [429]
+```
+
+The defaults that do apply are sized for a batch job: 10 attempts, 2 s initial
+backoff, multiplier 5, capped at 3 minutes — worst case roughly 19 minutes with a
+request thread held the whole time. `generate` is synchronous, so the budget is cut
+to 3 attempts and a 4 s cap: at most 3 s of added sleep. Combined with the one
+validation retry that is 6 model calls worst case, which is the ceiling worth
+having until generation moves to a background job.
+
+`RetryConfigTest` pins all three facts against the real `application.yml`, because
+each of them fails without a symptom: drop the jar and retry disappears, drop the
+`429` line and rate limits stop being retried, widen the budget and a thread blocks
+for a quarter of an hour.
+
+**History is append-only, and separate from the code.** `ChatMessageEntity` has no
+`updatedAt` and its `createdAt` is `updatable = false` — history that can be edited
+is not history, so a correction is a new message rather than a rewrite of an old
+one. Ordering is by `id`, not `createdAt`: a prompt and its reply can land in the
+same millisecond, and then timestamp ordering is undefined.
+
+Only the reply's one-line summary is stored, never the code — the files are already
+persisted, and duplicating them into the transcript would mean the history alone
+could exhaust the context window it exists to feed.
+
+**A follow-up needs the current code and the past intent, for different reasons.**
+The files answer "what is there now": without them "make the header blue" rewrites
+the whole app from the prompt and silently drops every earlier feature. The
+transcript answers "what was asked for": intent like "keep it minimal" leaves no
+trace in the code that a later turn could read back. Context is capped at the last
+six messages, since older turns cost tokens without adding constraints.
+
+The user prompt is recorded *before* the model call, so a failed attempt still shows
+what was asked. Context is read before that, so the new prompt cannot appear in its
+own history.
+
 **The generated output format is dictated by the preview mechanism.** Previews
 run in an `iframe`, which rules out a build step, which rules out `import`
 statements and `package.json`. So the model is constrained to CDN-loaded React
@@ -318,6 +414,13 @@ Only breakage is validated, never taste. "Generous whitespace" cannot be checked
 by string matching, and failing on it would burn a retry and a slice of the free
 tier for nothing, so aesthetics stay in the prompt where a miss is survivable.
 
+That line held under pressure when every generated file came back with zero line
+breaks — `app.jsx` was a single 1846-character line. It is trivially detectable and
+it was still the wrong thing to validate: the app ran perfectly, and rejecting it
+would have spent a retry on formatting. One prompt rule asking for real line breaks
+and two-space indentation took it to 25 newlines. The test for whether a rule
+belongs in the validator is not "can I check it" but "does the app break".
+
 The validator is the one piece here with unit tests, and deliberately so: it is a
 pure function, so its reject paths can be proven without spending a model call —
 which an end-to-end test can never do reliably, since a good reply never
@@ -355,7 +458,8 @@ become an HTTP call during a service split; a repository call cannot.
 
 ## Known gaps
 
-- `GeneratedAppValidator` is the only tested class; nothing else has tests
+- `GeneratedAppValidator` and the retry configuration are the only tested things;
+  no controller, service or repository has a test
 - Every preview shares one origin, so generated apps share `localStorage`. A
   regenerated counter opened at 1 instead of 0, having inherited the previous
   app's saved state. Per-project origins are the fix, and they are also what
@@ -368,25 +472,31 @@ become an HTTP call during a service split; a repository call cannot.
 - Validation covers what breaks the app, not whether it does what was asked. A
   request for "increment and reset" came back with increment and *decrement*, and
   no string match catches that
-- Prompts are not persisted, only the files they produced, so there is no history
-  to build follow-up prompts ("make the header blue") from
-- Nothing stops two generations running on the same project at once. Optimistic
-  locking makes the *writes* safe but is not an interlock: each status update
-  reloads the row in its own short transaction, so a double-clicked button still
-  fires two model calls and burns quota twice. The fix is a compare-and-set —
-  `set status = 'GENERATING' where id = ? and status <> 'GENERATING'`, then check
-  the affected row count
+- The interlock has no lease, so a process killed mid-generation leaves the project
+  stuck in `GENERATING` and every later `generate` answers 409 forever. A claim
+  should carry a timestamp and expire, so a stale one can be taken over
+- The assistant's stored message is the app's summary, so it records what the app
+  *is* rather than what the turn *changed*. A functional change shows up (adding a
+  filter widened the summary) but a cosmetic one does not — after "make it purple"
+  the summary was word-for-word what it had been. A per-turn note of what changed
+  would be the more useful thing to keep
+- Deleting a project leaves its `generated_files` and `chat_messages` rows behind.
+  There are no foreign keys, by design, so nothing cascades. `workspace` should not
+  import `generation` to clean up either — the fix is an event `generation` listens
+  for, which is also what a service split would need
+- Follow-ups are only as reliable as the model's willingness to preserve what it was
+  not asked to change. One measured turn kept 98.5% of `app.jsx` and left
+  `index.html` byte-identical, but nothing enforces it: the validator checks that
+  the app runs, not that last turn's features survived
+- Generation is synchronous, so a request thread is held for the whole model call.
+  Retry is bounded now, but the real fix is a job queue with the client polling
+- `generate` is not idempotent — a retried HTTP request bills a fresh generation.
+  An idempotency key would fix it
 - Schema changes to populated tables have to be applied by hand. Adding the
   `version` column needed `alter table projects add column version bigint not
   null default 0` first, because `ddl-auto: update` emits it without a default
   and Postgres rejects that on a non-empty table. This is the concrete cost of
   the missing migration tool below
-- Spring AI retries `429`s out of the box, but its defaults are too generous for
-  a synchronous endpoint: 10 attempts with backoff capped at 3 minutes can block
-  a request thread for roughly 19 minutes. The free tier allows about seven
-  generations per minute, so `429` is routine and this needs a bounded budget —
-  and eventually an async job rather than a blocking call
-- `POST /api/ai-test` is a temporary probe still sitting in `HealthController`
 - `ddl-auto: update` instead of a migration tool (Flyway/Liquibase)
 - No refresh tokens or token revocation
 - No rate limiting on auth endpoints

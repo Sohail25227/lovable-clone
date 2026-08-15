@@ -11,7 +11,10 @@ import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.stereotype.Service;
 
 import com.aibuilder.lovableclone.common.exception.GenerationFailedException;
+import com.aibuilder.lovableclone.generation.dto.ChatMessageResponseDto;
 import com.aibuilder.lovableclone.generation.dto.GeneratedAppDto;
+import com.aibuilder.lovableclone.generation.dto.GeneratedFileResponseDto;
+import com.aibuilder.lovableclone.generation.entity.MessageRoleEnum;
 import com.aibuilder.lovableclone.generation.validation.GeneratedAppValidator;
 import com.aibuilder.lovableclone.workspace.entity.ProjectStatusEnum;
 import com.aibuilder.lovableclone.workspace.service.ProjectService;
@@ -54,7 +57,15 @@ public class CodeGenerationService {
 
             styles.css holds only rules that Tailwind cannot express, and may be nearly empty.
 
+            Format every file the way a person would write it: real line breaks between
+            statements, JSX elements and CSS rules, and two-space indentation. Never put a
+            whole file on one line. The user reads this code.
+
             Build exactly the features the request asks for. Do not invent extra controls.
+
+            When the request includes the app as it currently stands, it is a change to that
+            app, not a fresh start. Apply only what is asked and keep every other feature,
+            wording and style exactly as it is. Always return all three files in full.
 
             Visual bar: generous whitespace, one accent colour used consistently,
             visible hover and focus styles on everything clickable, and a layout that
@@ -69,28 +80,40 @@ public class CodeGenerationService {
     private final ChatClient chatClient;
     private final ProjectService projectService;
     private final GeneratedFileService generatedFileService;
+    private final ChatMessageService chatMessageService;
     private final GeneratedAppValidator validator;
 
     public CodeGenerationService(ChatClient chatClient,
                                  ProjectService projectService,
                                  GeneratedFileService generatedFileService,
+                                 ChatMessageService chatMessageService,
                                  GeneratedAppValidator validator) {
         this.chatClient = chatClient;
         this.projectService = projectService;
         this.generatedFileService = generatedFileService;
+        this.chatMessageService = chatMessageService;
         this.validator = validator;
     }
 
     public GeneratedAppDto generateForProject(Long projectId, Long ownerId, String prompt) {
-        // Ownership check. Project nahi mila ya tumhara nahi to yahi 404 fenk dega
-        projectService.getProjectById(projectId, ownerId);
+        // Ownership check aur interlock ek hi atomic statement mein. Apne transaction mein
+        // commit hota hai, taaki LLM fail hone pe bhi GENERATING zinda rahe. Double-click
+        // ki doosri request yahin 409 le kar wapas jaati hai, model call se pehle
+        projectService.claimForGeneration(projectId, ownerId);
 
-        // Apne transaction mein commit hota hai, taaki LLM fail hone pe bhi zinda rahe
-        projectService.updateStatus(projectId, ownerId, ProjectStatusEnum.GENERATING);
+        // Context model call se pehle padha jata hai, taaki naya prompt usme na aa jaye
+        String context = buildContext(projectId, ownerId);
+
+        // Prompt pehle likha jata hai, kyunki fail hui koshish bhi history hai — aur wahi
+        // batati hai ki user ne kya maanga tha jab jawab nahi aaya
+        chatMessageService.record(projectId, MessageRoleEnum.USER, prompt);
 
         try {
-            GeneratedAppDto app = generateValidApp(projectId, prompt);
+            GeneratedAppDto app = generateValidApp(projectId, prompt, context);
             generatedFileService.replaceFiles(projectId, app);
+            // Poora code store ho chuka hai; message mein summary hi jaati hai, warna
+            // history hi context window kha jayegi
+            chatMessageService.record(projectId, MessageRoleEnum.ASSISTANT, app.summary());
             projectService.updateStatus(projectId, ownerId, ProjectStatusEnum.READY);
             return app;
 
@@ -98,6 +121,44 @@ public class CodeGenerationService {
             markFailed(projectId, ownerId, ex);
             throw ex;
         }
+    }
+
+    /**
+     * Pehli generation ke liye khaali, uske baad follow-up ka context.
+     *
+     * Follow-up ke do hisse hain, aur dono chahiye. Maujooda files batati hain "abhi kya hai" —
+     * "header ko neela karo" bina current code ke poori app dobara likhwa deta, aur baaki sab
+     * badal jata. History batati hai woh intent jo code mein dikhta nahi: "minimal rakho"
+     * jaisi baat file padh kar pata nahi chalti.
+     */
+    private String buildContext(Long projectId, Long ownerId) {
+        List<GeneratedFileResponseDto> files = generatedFileService.getFiles(projectId, ownerId);
+        if (files.isEmpty()) {
+            return "";
+        }
+
+        StringBuilder context = new StringBuilder();
+
+        List<ChatMessageResponseDto> history = chatMessageService.getRecentForContext(projectId);
+        if (!history.isEmpty()) {
+            context.append("Earlier turns for this app, oldest first:\n");
+            for (ChatMessageResponseDto message : history) {
+                context.append(message.role() == MessageRoleEnum.USER ? "Asked: " : "Built: ")
+                        .append(message.content())
+                        .append('\n');
+            }
+            context.append('\n');
+        }
+
+        context.append("This is the app as it stands. Apply the change to it and return all"
+                + " three files complete, keeping everything the request does not mention:\n\n");
+
+        for (GeneratedFileResponseDto file : files) {
+            context.append("--- ").append(file.path()).append(" ---\n")
+                    .append(file.content()).append("\n\n");
+        }
+
+        return context.toString();
     }
 
     private void markFailed(Long projectId, Long ownerId, RuntimeException cause) {
@@ -112,11 +173,11 @@ public class CodeGenerationService {
     // Prompt ke rules request hain, guarantee nahi — model unhe todta rehta hai. Isliye
     // output check hota hai aur violations wapas bhej ke ek sudharne ka mauka milta hai.
     // Invalid code kabhi store nahi hota, warna READY ka matlab jhooth ho jata
-    private GeneratedAppDto generateValidApp(Long projectId, String prompt) {
+    private GeneratedAppDto generateValidApp(Long projectId, String prompt, String context) {
         List<String> violations = List.of();
 
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-            GeneratedAppDto app = callModel(projectId, prompt, violations, attempt);
+            GeneratedAppDto app = callModel(projectId, prompt, context, violations, attempt);
             violations = validator.validate(app);
 
             if (violations.isEmpty()) {
@@ -130,25 +191,34 @@ public class CodeGenerationService {
                 "The model could not produce a runnable app: " + String.join("; ", violations));
     }
 
-    private String userMessage(String prompt, List<String> violations) {
-        if (violations.isEmpty()) {
-            return prompt;
+    private String userMessage(String prompt, String context, List<String> violations) {
+        StringBuilder message = new StringBuilder();
+
+        // Context pehle, request baad mein: instruction aakhir mein rehne se model use
+        // background ke bajaye kaam samajhta hai
+        if (!context.isEmpty()) {
+            message.append(context);
         }
-        // Model ko wahi wajahein wapas di jaati hain jinpe use reject kiya gaya
-        return prompt
-                + "\n\nYour previous attempt was rejected. Fix every point below and return"
-                + " the complete app again:\n"
-                + violations.stream().map(v -> "- " + v).collect(Collectors.joining("\n"));
+        message.append(prompt);
+
+        if (!violations.isEmpty()) {
+            // Model ko wahi wajahein wapas di jaati hain jinpe use reject kiya gaya
+            message.append("\n\nYour previous attempt was rejected. Fix every point below and")
+                    .append(" return the complete app again:\n")
+                    .append(violations.stream().map(v -> "- " + v).collect(Collectors.joining("\n")));
+        }
+
+        return message.toString();
     }
 
-    private GeneratedAppDto callModel(Long projectId, String prompt,
+    private GeneratedAppDto callModel(Long projectId, String prompt, String context,
                                       List<String> violations, int attempt) {
         log.info("Generating app for project {} (attempt {} of {})", projectId, attempt, MAX_ATTEMPTS);
         long startedAt = System.currentTimeMillis();
 
         GeneratedAppDto app = chatClient.prompt()
                 .system(SYSTEM_PROMPT)
-                .user(userMessage(prompt, violations))
+                .user(userMessage(prompt, context, violations))
                 // JSON mode: provider decoding ko constrain karta hai, isliye escaping
                 // ki galti namumkin ho jati hai. maxTokens truncation ke against insurance
                 .options(OpenAiChatOptions.builder()

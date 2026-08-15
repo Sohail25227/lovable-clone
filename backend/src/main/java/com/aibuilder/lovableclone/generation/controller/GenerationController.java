@@ -11,9 +11,11 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.aibuilder.lovableclone.common.security.AuthUtil;
+import com.aibuilder.lovableclone.generation.dto.ChatMessageResponseDto;
 import com.aibuilder.lovableclone.generation.dto.GenerateRequestDto;
 import com.aibuilder.lovableclone.generation.dto.GeneratedAppDto;
 import com.aibuilder.lovableclone.generation.dto.GeneratedFileResponseDto;
+import com.aibuilder.lovableclone.generation.service.ChatMessageService;
 import com.aibuilder.lovableclone.generation.service.CodeGenerationService;
 import com.aibuilder.lovableclone.generation.service.GeneratedFileService;
 
@@ -25,13 +27,16 @@ public class GenerationController {
 
     private final CodeGenerationService codeGenerationService;
     private final GeneratedFileService generatedFileService;
+    private final ChatMessageService chatMessageService;
     private final AuthUtil authUtil;
 
     public GenerationController(CodeGenerationService codeGenerationService,
                                 GeneratedFileService generatedFileService,
+                                ChatMessageService chatMessageService,
                                 AuthUtil authUtil) {
         this.codeGenerationService = codeGenerationService;
         this.generatedFileService = generatedFileService;
+        this.chatMessageService = chatMessageService;
         this.authUtil = authUtil;
     }
 
@@ -51,5 +56,11 @@ public class GenerationController {
     public ResponseEntity<List<GeneratedFileResponseDto>> getFiles(@PathVariable Long projectId) {
         Long userId = authUtil.getCurrentUserId();
         return ResponseEntity.ok(generatedFileService.getFiles(projectId, userId));
+    }
+
+    @GetMapping("/{projectId}/messages")
+    public ResponseEntity<List<ChatMessageResponseDto>> getMessages(@PathVariable Long projectId) {
+        Long userId = authUtil.getCurrentUserId();
+        return ResponseEntity.ok(chatMessageService.getHistory(projectId, userId));
     }
 }

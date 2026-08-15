@@ -1,10 +1,12 @@
 package com.aibuilder.lovableclone.workspace.service;
 
+import java.time.Instant;
 import java.util.List;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.aibuilder.lovableclone.common.exception.GenerationInProgressException;
 import com.aibuilder.lovableclone.common.exception.ResourceNotFoundException;
 import com.aibuilder.lovableclone.workspace.dto.CreateProjectRequestDto;
 import com.aibuilder.lovableclone.workspace.dto.ProjectResponseDto;
@@ -75,5 +77,30 @@ public class ProjectService {
 
         project.setStatus(status);
         // save() ki zarurat nahi — managed entity hai, commit pe dirty checking likh degi
+    }
+
+    /**
+     * GENERATING pe daawa karta hai, sirf tab jab project abhi GENERATING na ho.
+     *
+     * Optimistic locking writes ko safe banata hai par interlock nahi hai: do requests
+     * apni-apni transaction mein row padh ke dono GENERATING likh sakti hain aur dono
+     * model call kar sakti hain. Yeh check DB mein hota hai, isliye do mein se ek harta hai.
+     */
+    @Transactional
+    public void claimForGeneration(Long projectId, Long ownerId) {
+        int claimed = projectRepository.compareAndSetStatus(
+                projectId, ownerId, ProjectStatusEnum.GENERATING, Instant.now());
+
+        if (claimed == 1) {
+            return;
+        }
+
+        // Zero rows ke do matlab hain: project maujood nahi/tumhara nahi, ya already
+        // GENERATING hai. Inhe alag karne ke liye ek read, warna 404 ko 409 bata denge
+        projectRepository.findByIdAndOwnerId(projectId, ownerId)
+                .orElseThrow(() -> new ResourceNotFoundException("Project not found"));
+
+        throw new GenerationInProgressException(
+                "A generation is already running for this project");
     }
 }

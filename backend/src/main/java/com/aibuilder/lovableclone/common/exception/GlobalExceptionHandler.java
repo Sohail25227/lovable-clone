@@ -56,6 +56,12 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.CONFLICT, "Project was modified by another request, please retry");
     }
 
+    // Interlock ne doosri parallel generation rok di. Retry karne layak hai, isliye 409
+    @ExceptionHandler(GenerationInProgressException.class)
+    public ResponseEntity<ApiErrorDto> handleGenerationInProgress(GenerationInProgressException ex) {
+        return build(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
     // Request theek thi, upstream model ne bekaar output diya — isliye 502, 500 nahi.
     // Wajah client ko bhi jaati hai, kyunki prompt badalna hi aage ka raasta hai
     @ExceptionHandler(GenerationFailedException.class)
