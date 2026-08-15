@@ -41,3 +41,8 @@ jwt:
   # No default on purpose: app must fail fast if the secret is not supplied
   # export JWT_SECRET_KEY="<at least 32 random chars>"
   secret-key: ${JWT_SECRET_KEY}
+
+app:
+  # CORS ki allowed origin, aur preview ke CSP mein frame-ancestors — dono yahi padhte hain.
+  # Secrets ke ulat iska default theek hai: yeh sensitive nahi hai aur Vite ka dev port hai
+  frontend-origin: ${FRONTEND_ORIGIN:http://localhost:5173}

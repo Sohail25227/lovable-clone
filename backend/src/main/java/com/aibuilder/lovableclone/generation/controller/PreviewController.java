@@ -4,6 +4,7 @@ import java.net.URI;
 import java.time.Instant;
 import java.util.List;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -27,16 +28,7 @@ public class PreviewController {
 
     private static final String INDEX = "index.html";
 
-    // Generated code hamari hi origin se chalta hai, isliye scripts ko un CDNs tak
-    // seemit karte hain jo contract maangta hai. unsafe-eval hataya nahi ja sakta —
-    // Babel standalone JSX ko browser mein eval se hi compile karta hai
-    private static final String CSP = String.join("; ",
-            "default-src 'none'",
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://cdn.tailwindcss.com",
-            "style-src 'self' 'unsafe-inline'",
-            "img-src 'self' data: https:",
-            "font-src https:",
-            "connect-src 'self'");
+    private final String csp;
 
     private final JwtService jwtService;
     private final GeneratedFileService generatedFileService;
@@ -46,11 +38,29 @@ public class PreviewController {
     public PreviewController(JwtService jwtService,
                              GeneratedFileService generatedFileService,
                              ProjectService projectService,
-                             AuthUtil authUtil) {
+                             AuthUtil authUtil,
+                             @Value("${app.frontend-origin}") String frontendOrigin) {
+        this.csp = buildCsp(frontendOrigin);
         this.jwtService = jwtService;
         this.generatedFileService = generatedFileService;
         this.projectService = projectService;
         this.authUtil = authUtil;
+    }
+
+    // Generated code hamari hi origin se chalta hai, isliye scripts ko un CDNs tak
+    // seemit karte hain jo contract maangta hai. unsafe-eval hataya nahi ja sakta —
+    // Babel standalone JSX ko browser mein eval se hi compile karta hai
+    private static String buildCsp(String frontendOrigin) {
+        return String.join("; ",
+                "default-src 'none'",
+                "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://cdn.tailwindcss.com",
+                "style-src 'self' 'unsafe-inline'",
+                "img-src 'self' data: https:",
+                "font-src https:",
+                "connect-src 'self'",
+                // Yeh hataye gaye X-Frame-Options ki jagah leta hai. Frontend preview ko
+                // embed kar sake, par koi doosri website user ki app frame na kar sake
+                "frame-ancestors 'self' " + frontendOrigin);
     }
 
     @PostMapping("/api/projects/{projectId}/preview-token")
@@ -94,7 +104,7 @@ public class PreviewController {
 
         return ResponseEntity.ok()
                 .contentType(contentTypeFor(wanted))
-                .header("Content-Security-Policy", CSP)
+                .header("Content-Security-Policy", csp)
                 .header("X-Content-Type-Options", "nosniff")
                 // Regenerate purani files badal deta hai, isliye kuch cache nahi hota
                 .cacheControl(CacheControl.noStore())
