@@ -23,24 +23,20 @@ spring:
     openai:
       api-key: ${GROQ_API_KEY}
       base-url: https://api.groq.com/openai/v1
+      # Retry yahan hai, spring.ai.retry.* mein nahi. Spring AI 2.0 ka OpenAI path
+      # openai-java SDK (OkHttp) se jata hai, jo Spring ke RestClient aur uske
+      # ResponseErrorHandler ko use hi nahi karta — isliye spring.ai.retry.* is model
+      # par bilkul asar nahi karta. Yeh knob SDK ka hai, aur asli wahi hai.
+      #
+      # Default 3 attempts aur 60s timeout hain, matlab worst case ~3 min ek thread ka.
+      # generate synchronous hai aur uske upar ek validation retry bhi hai, isliye
+      # dono ko kasa gaya hai: 2 x 45s, yaani ~90s per validation attempt
+      max-retries: 2
+      timeout: 45s
       chat:
         options:
           model: llama-3.3-70b-versatile
           temperature: 0.3
-    retry:
-      # Defaults (10 attempts, 2s initial, x5, 3m cap) ek request thread ko ~19 min
-      # tak rok sakte hain. Generate synchronous hai, isliye budget chhota rakha hai:
-      # worst case 3 calls aur 3s sleep (1s + 2s)
-      max-attempts: 3
-      backoff:
-        initial-interval: 1s
-        multiplier: 2
-        max-interval: 4s
-      # 429 4xx hai, aur on-client-errors default false hai, to warna rate limit
-      # NonTransient ban ke bina retry fail ho jata. Yeh list 4xx rule se pehle
-      # check hoti hai, isliye sirf 429 transient hota hai — 401/400 nahi
-      on-http-codes:
-        - 429
 jwt:
   # No default on purpose: app must fail fast if the secret is not supplied
   # export JWT_SECRET_KEY="<at least 32 random chars>"
