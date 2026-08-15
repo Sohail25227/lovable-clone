@@ -87,6 +87,13 @@
     <groupId>org.springframework.ai</groupId>
     <artifactId>spring-ai-starter-model-openai</artifactId>
 </dependency>
+<!-- Spring AI 2.0 mein retry opt-in hai: autoconfigure-retry starter ke saath aata
+     hai, par woh @ConditionalOnClass(RetryUtils) hai aur RetryUtils yahan rehta hai.
+     Isko chhode to koi retry nahi hota, 5xx pe bhi nahi -->
+<dependency>
+    <groupId>org.springframework.ai</groupId>
+    <artifactId>spring-ai-retry</artifactId>
+</dependency>
     </dependencies>
 
     <build>
