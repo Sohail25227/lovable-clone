@@ -16,18 +16,21 @@ monolith to microservices.
 | 2 | PostgreSQL via Docker Compose, JPA wiring | Done |
 | 3 | JWT auth (signup / login / me), global error handling | Done |
 | 4 | Project CRUD with ownership enforcement | Done |
-| 5 | Spring AI + Groq LLM, code generation | Next |
-| 6+ | File storage (MinIO), RAG (Qdrant), live preview (K8s) | Planned |
+| 5 | Spring AI + Groq, prompt → runnable app via structured output | Done |
+| 6 | Persist generated files and prompt history, live preview | Next |
+| 7+ | File storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
 
 ## Stack
 
 **Current:** Java 17 · Spring Boot 4.0.0 · Spring Security · Spring Data JPA ·
-PostgreSQL 16 · JJWT · Docker Compose
+PostgreSQL 16 · JJWT · Spring AI 2.0 · Groq (Llama 3.3 70B) · Docker Compose
 
-**Planned:** Spring AI 2.0 · Groq (Llama 3.3) · Redis · MinIO · Qdrant ·
-React + Vite · Kubernetes (k3s)
+**Planned:** Redis · MinIO · Qdrant · React + Vite · Kubernetes (k3s)
+
+Groq is reached through the OpenAI-compatible starter, so the provider is a
+`base-url` change rather than a code change.
 
 ---
 
@@ -48,13 +51,20 @@ docker compose up -d
 Postgres listens on `localhost:5432` (db/user `aibuilder`). Data persists in a
 named volume across restarts.
 
-### 2. Set the JWT secret
+### 2. Set the secrets
 
-The signing key is **not** committed. Export it before starting the app:
+Neither is committed, and neither has a default — the app fails to start
+rather than run with a placeholder.
 
 ```bash
 export JWT_SECRET_KEY="any-long-random-string-at-least-32-chars-long"
+export GROQ_API_KEY="gsk_..."   # free key from https://console.groq.com
 ```
+
+> On a network that intercepts TLS (corporate proxies such as Zscaler), calls
+> to Groq fail with `PKIX path building failed` while `curl` to the same URL
+> succeeds. `curl` trusts the OS keychain; the JVM trusts its own `cacerts`.
+> Import the proxy's root CA into `$JAVA_HOME/lib/security/cacerts`.
 
 ### 3. Run the backend
 
@@ -72,7 +82,10 @@ App starts on **http://localhost:8081**.
 Hibernate runs with `ddl-auto: update`, so tables are created on first boot.
 
 > When behaviour doesn't match the source, run `mvn clean spring-boot:run`.
-> Maven's incremental compile can silently reuse stale `.class` files.
+> The IDE's compiler and Maven both write to `target/classes`, so a save
+> caught mid-write can leave a truncated `.class` file. Maven then skips it,
+> because its incremental check compares timestamps rather than content, and
+> the build stays green. `javap -p target/classes/...` shows the truth.
 
 ---
 
@@ -99,6 +112,24 @@ Send `Authorization: Bearer <token>`.
 | `GET` | `/api/projects` | List caller's projects |
 | `GET` | `/api/projects/{id}` | Get one project |
 | `DELETE` | `/api/projects/{id}` | Delete project (`204`) |
+| `POST` | `/api/projects/{id}/generate` | Prompt → generated app (`200`) |
+
+`generate` takes `{"prompt": "..."}` and returns an app that runs in a browser
+with no build step:
+
+```json
+{
+  "appName": "Todo List",
+  "summary": "Add, complete, filter and delete tasks.",
+  "files": [
+    { "path": "index.html", "content": "..." },
+    { "path": "app.jsx",    "content": "..." },
+    { "path": "styles.css", "content": "..." }
+  ]
+}
+```
+
+Expect 3–10 seconds per call. The response is **not persisted yet** (Day 6).
 
 Errors return a consistent shape:
 
@@ -119,10 +150,16 @@ TOKEN=$(curl -s -X POST localhost:8081/api/auth/signup \
   -d '{"username":"alice","password":"secret123","name":"Alice"}' \
   | sed 's/.*"accessToken":"\([^"]*\)".*/\1/')
 
-curl -s -X POST localhost:8081/api/projects \
+PROJECT_ID=$(curl -s -X POST localhost:8081/api/projects \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"My first app","description":"A todo list"}'
+  -d '{"name":"My first app","description":"A todo list"}' \
+  | sed 's/.*"id":\([0-9]*\).*/\1/')
+
+curl -s -X POST "localhost:8081/api/projects/$PROJECT_ID/generate" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"A todo app with add, complete, filter and delete."}'
 ```
 
 ---
@@ -134,7 +171,8 @@ Lovable_Clone/
 ├── backend/
 │   └── src/main/java/com/aibuilder/lovableclone/
 │       ├── account/      ← users, auth
-│       ├── workspace/    ← projects, files
+│       ├── workspace/    ← projects
+│       ├── generation/   ← prompts, LLM calls, generated apps
 │       └── common/       ← security, config, exceptions
 ├── docker-compose.yml    ← PostgreSQL
 ├── frontend/             ← React (not started)
@@ -149,7 +187,8 @@ Each feature package owns its own `controller` / `service` / `repository` /
 ## Design decisions
 
 **Modular monolith, not microservices (yet).** Packages are split along the
-seams a future service split would follow (`account`, `workspace`). Cross-module
+seams a future service split would follow (`account`, `workspace`,
+`generation`). Cross-module
 references are by **id only** — `ProjectEntity` holds a `Long ownerId` rather
 than a JPA relation to `UserEntity`. A foreign key would not survive the split
 into separate databases; an id does.
@@ -180,11 +219,53 @@ exceptions to status codes and returns a uniform `ApiErrorDto`. Unexpected
 exceptions are logged with a stack trace but respond with a generic message,
 so internals never leak to clients.
 
+**The generated output format is dictated by the preview mechanism.** Previews
+run in an `iframe`, which rules out a build step, which rules out `import`
+statements and `package.json`. So the model is constrained to CDN-loaded React
+with in-browser Babel. The downstream constraint decides the upstream contract.
+
+**Response validity is enforced by the provider, not requested in the prompt.**
+Asking the model to escape a code payload into JSON strings failed
+intermittently — one unescaped quote inside JSX ends the string and the parse
+dies. Groq's JSON mode constrains decoding, so malformed output becomes
+structurally impossible instead of merely discouraged. `maxTokens` is capped
+alongside it, because a truncated reply is also invalid JSON.
+
+**The prompt shows APIs rather than naming versions.** "React 18" produced
+`ReactDOM.render` (removed in 18) and Tailwind 2, because version labels are
+resolved from training data. Spelling out the exact `createRoot` call and
+pinning the CDN URL fixed five observed defects in one pass. Requirements are
+also phrased so they can be checked — "render a message when the list is
+empty" survives, "handle the empty state" gets ignored.
+
+**Prompt-shaped contracts live in records.** `@JsonPropertyDescription` on
+record components feeds the JSON schema that Spring AI sends to the model, so
+the model reads the same contract the parser enforces. Renaming a field changes
+the prompt.
+
+**No transaction spans the model call.** A generation takes seconds; wrapping it
+in `@Transactional` would hold a pooled connection for that entire round trip
+and exhaust the pool under modest concurrency. Ownership is checked in a short
+transaction, the model is called outside one.
+
+**Modules call each other's services, never each other's repositories.**
+`generation` reaches `workspace` through `ProjectService`. A service call can
+become an HTTP call during a service split; a repository call cannot.
+
 ---
 
 ## Known gaps
 
 - No automated tests yet
+- Generated files and prompts are not persisted — a response is lost once read
+- No conversation history, so follow-up prompts ("make the header blue")
+  cannot work yet
+- Spring AI retries `429`s out of the box, but its defaults are too generous for
+  a synchronous endpoint: 10 attempts with backoff capped at 3 minutes can block
+  a request thread for roughly 19 minutes. The free tier allows about seven
+  generations per minute, so `429` is routine and this needs a bounded budget —
+  and eventually an async job rather than a blocking call
+- `POST /api/ai-test` is a temporary probe still sitting in `HealthController`
 - `ddl-auto: update` instead of a migration tool (Flyway/Liquibase)
 - No refresh tokens or token revocation
 - No rate limiting on auth endpoints
