@@ -2,7 +2,11 @@
 # YAML format — indentation matter karti hai (spaces, not tabs)
 
 server:
-  port: 8081   # App is port pe chalegi → http://localhost:8081
+  # Local pe 8081. Hosted platforms port khud chunte hain aur PORT env var mein batate
+  # hain — us par na sunne wali app "unhealthy" maani jati hai aur restart hoti rehti hai.
+  # Baaki config ke liye yeh zaruri nahi: SPRING_DATASOURCE_URL jaise vars Spring khud
+  # relaxed binding se padh leta hai, par PORT ka naam us pattern se bahar hai
+  port: ${PORT:8081}
 
 spring:
   application:

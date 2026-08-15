@@ -25,7 +25,9 @@ monolith to microservices.
 | 7 | React frontend: auth, projects, builder with live preview | Done |
 | 7b | Flyway owns the schema, Hibernate only validates it | Done |
 | 7c | Generation claims expire, so a crash cannot brick a project | Done |
-| 8+ | Deploy, file storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
+| 8 | Backend containerised, production profile, image verified end to end | Done |
+| 8b | Hosted: managed Postgres, backend image, static frontend | Next |
+| 9+ | File storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
 
@@ -114,6 +116,37 @@ Both sides read the same origin from one place. Change it and change both:
 export FRONTEND_ORIGIN="http://localhost:5173"   # backend: CORS + preview frame-ancestors
 # frontend/.env → VITE_API_BASE_URL=http://localhost:8081
 ```
+
+### 5. Optional: run the backend as a container
+
+This is what a host runs, so it is worth exercising before deploying. Tests run inside
+the build, so the image only exists if the suite passes.
+
+```bash
+cd backend
+docker build -t lovable-backend:test .
+
+docker run --rm \
+  -e SPRING_PROFILES_ACTIVE=prod \
+  -e PORT=9000 \
+  -e SPRING_DATASOURCE_URL="jdbc:postgresql://host.docker.internal:5432/aibuilder" \
+  -e SPRING_DATASOURCE_USERNAME=aibuilder \
+  -e SPRING_DATASOURCE_PASSWORD=aibuilder123 \
+  -e JWT_SECRET_KEY="$JWT_SECRET_KEY" \
+  -e GROQ_API_KEY="$GROQ_API_KEY" \
+  -p 8082:9000 \
+  lovable-backend:test
+```
+
+`host.docker.internal` is how the container reaches Postgres on the host; `localhost`
+inside a container is the container. The `PORT` and published-port mismatch above is
+deliberate — it proves the app follows `PORT` rather than the hardcoded `8081` a host
+would kill it for.
+
+Behind a TLS-intercepting proxy, generation fails inside the container with a PKIX error
+even though it works outside: the host JDK has had the proxy's CA imported and the
+container's has not. Everything else works, and generation is not worth breaking the
+image over — see the design note below.
 
 ---
 
@@ -633,6 +666,45 @@ status code, because the useful part is what the backend already said — the ra
 wait, or which contract rules the model broke. A generic "Something went wrong" per
 status would discard exactly the information the user needs.
 
+**The image is built in two stages, and only the second one ships.** Building needs a JDK
+and Maven; running needs a JRE. Keeping one stage would leave Maven, the source and a
+few hundred megabytes of `~/.m2` sitting in production. Dependencies live in a BuildKit
+cache mount rather than an image layer, so they survive between builds without being
+shipped — a rebuild after the last fix took 13 seconds against 150 for the first.
+
+An earlier version cached dependencies with `dependency:go-offline` in its own layer.
+That resolves every plugin and profile, which is far more than `package` needs, and
+`package` then downloads its own set anyway. Tests run inside the build, so no image
+exists unless the suite is green; they need no secrets, which is what makes that
+possible.
+
+Two things only a real run could catch, both found that way:
+
+- `eclipse-temurin:17-jre-alpine` is published for amd64 only, and this is an Apple
+  Silicon machine. `docker manifest inspect` says the tag exists — the failure is `no
+  match for platform in manifest`, which arrives from the build, not from the registry.
+  The multi-arch `17-jre` tag is Debian, so the non-root user is created with `useradd`
+  rather than BusyBox's `adduser -S`
+- `spring.datasource.hikari.*` binds straight onto `HikariDataSource`, whose setters take
+  plain milliseconds. Boot's duration strings work almost everywhere else in the config,
+  so `connection-timeout: 30s` looks correct and stops the app from starting
+
+The container runs as `app`, not root, and reads `PORT` because hosts assign it and kill
+whatever does not listen there. `ENTRYPOINT` is `sh -c` with `exec`, so `JAVA_OPTS`
+expands *and* the JVM becomes PID 1 — without `exec` the shell keeps PID 1, `SIGTERM`
+never reaches Spring, and shutdown is a kill instead of a graceful stop. `JAVA_OPTS`
+sets `MaxRAMPercentage=75` because the JVM's default quarter of a 512 MB host is a
+128 MB heap, and Boot with JPA, Flyway and Spring AI does not start in that.
+
+Verified against the local database with `SPRING_PROFILES_ACTIVE=prod` and `PORT=9000`:
+Flyway validated three migrations and reported the schema current, startup took 5.9
+seconds, `whoami` answered `app`, and the API answered `200` on health and `401` on a
+bad password. Generation is the one thing that cannot be checked this way here — a
+corporate proxy re-signs TLS on this network, and the container's truststore has no
+reason to carry that CA. Adding it to the image would leak an internal detail into a
+public repository and would be wrong in production regardless, so generation is verified
+after deployment, where no such proxy exists.
+
 ---
 
 ## Known gaps
@@ -688,5 +760,9 @@ status would discard exactly the information the user needs.
 - No refresh tokens or token revocation, so an expired token means a silent bounce to
   the login screen mid-session
 - No rate limiting on auth endpoints
+- The image is ~250 MB compressed, most of it the Debian JRE and a 150 MB fat jar.
+  `jlink` with only the needed modules, or a layered jar so dependencies and application
+  classes cache separately, would cut both. Neither matters until deploys are frequent
+  enough for the pull to be felt
 - The frontend is dev-only: `npm run build` produces a bundle, but nothing serves it,
   and `VITE_API_BASE_URL` is baked in at build time rather than read at runtime

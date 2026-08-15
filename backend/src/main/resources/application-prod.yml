@@ -1,0 +1,37 @@
+# Sirf woh cheezein jo production mein alag honi chahiye. Baaki sab application.yml se
+# aati hai, aur secrets (GROQ_API_KEY, JWT_SECRET_KEY) plus SPRING_DATASOURCE_* env se.
+#
+# Activate karne ke liye: SPRING_PROFILES_ACTIVE=prod
+
+spring:
+  jpa:
+    # Dev mein yeh seekhne ke liye on hai, par har query ko log karna production mein
+    # do tarah se mehnga hai: I/O, aur logs mein data ka chala jana
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+
+  datasource:
+    # Yahan waqt milliseconds mein hai, `30s` jaisi duration string mein nahi. Baaki Boot
+    # config mein duration strings chalti hain, par yeh prefix seedha HikariDataSource par
+    # bind hota hai aur uske setters plain long lete hain — Boot ka Duration conversion
+    # beech mein aata hi nahi. `30s` likhne pe app boot hi nahi hoti
+    hikari:
+      # Neon free tier chhota hai aur 5 minute idle pe compute so jata hai. Bade pool ka
+      # koi faayda nahi jab ek hi instance chal raha ho, aur har connection wahan paisa hai
+      maximum-pool-size: 5
+
+      # 30s. Soye hue database ka pehla connection kuch second leta hai. Yeh default hi hai,
+      # par saaf likha hai taaki koi ise chhota karke wake-up ko failure na bana de
+      connection-timeout: 30000
+
+      # Idle connections ko zinda rakhne ka matlab compute jagaye rakhna hai
+      minimum-idle: 1
+      idle-timeout: 300000
+
+logging:
+  level:
+    # Startup pe Flyway ka bolna chahiye — kaunsi migration chali, yeh production mein
+    # sabse pehle dekhne wali cheez hoti hai jab schema shak ke ghere mein ho
+    org.flywaydb: INFO

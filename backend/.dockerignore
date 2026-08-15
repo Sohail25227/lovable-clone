@@ -1,0 +1,22 @@
+# Build context chhota rakhta hai, aur zaroori bhi hai: target/ bheja jaye to
+# local machine ki compiled classes image mein pahunch sakti hain aur cache
+# har build pe toot jata hai
+target/
+
+# Maven ka local settings container mein kaam ka nahi — Dockerfile isse use nahi karta
+.mvn/
+
+.git/
+.gitignore
+*.md
+
+# IDE aur OS ka kachra
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Kabhi galti se bhi image mein na jaye
+.env
+*.pem
+*.key
