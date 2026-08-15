@@ -26,7 +26,8 @@ monolith to microservices.
 | 7b | Flyway owns the schema, Hibernate only validates it | Done |
 | 7c | Generation claims expire, so a crash cannot brick a project | Done |
 | 8 | Backend containerised, production profile, image verified end to end | Done |
-| 8b | Hosted: managed Postgres, backend image, static frontend | Next |
+| 8b | Deployment config: Render blueprint, Vercel SPA rewrite | Done |
+| 8c | Hosted: Neon Postgres, backend on Render, frontend on Vercel | In progress |
 | 9+ | File storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
@@ -147,6 +148,100 @@ Behind a TLS-intercepting proxy, generation fails inside the container with a PK
 even though it works outside: the host JDK has had the proxy's CA imported and the
 container's has not. Everything else works, and generation is not worth breaking the
 image over — see the design note below.
+
+---
+
+## Deploying
+
+Three pieces, three hosts, all on free plans: Postgres on **Neon**, the backend container
+on **Render**, the built frontend on **Vercel**.
+
+The database is deliberately not on Render. A free Render Postgres expires 30 days after
+it is created and is deleted 14 days later, which is the wrong shape for something meant
+to stay up. Neon's free tier sleeps when idle instead of expiring, which is why
+`application-prod.yml` keeps `connection-timeout` at 30 seconds and `minimum-idle` at 1.
+
+Order matters, because two of the three need a URL the others have not produced yet:
+database, then backend, then frontend, then one last edit to the backend.
+
+### 1. Database (Neon)
+
+Create a project in the **Singapore** region, matching Render below. Neon hands back a
+connection string; Spring needs it split into three, and one part of it changed:
+
+```
+postgresql://alice:secret@ep-cool-name.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+           └─user┘ └pass┘ └──────────────── host ────────────────────┘ └db┘
+
+SPRING_DATASOURCE_URL       jdbc:postgresql://ep-cool-name.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+SPRING_DATASOURCE_USERNAME  alice
+SPRING_DATASOURCE_PASSWORD  secret
+```
+
+Two things to get right in that URL:
+
+- **Take the direct connection string, not the pooled one.** Neon's pooled endpoint (the
+  host with `-pooler` in it) is PgBouncer in transaction mode, where a session is not
+  guaranteed to be the same connection twice. Flyway takes a session-level advisory lock
+  around migrations, so it can hang or fail there. The app brings its own pool anyway.
+- **Keep `sslmode=require`, drop anything else Neon appends.** `channel_binding` is a
+  libpq parameter that the JDBC driver does not understand.
+
+Nothing needs to be created inside the database. Flyway builds the schema on first boot.
+
+### 2. Backend (Render)
+
+The repo has a `render.yaml`, so this is a **Blueprint**, not a hand-made service: New →
+Blueprint → pick the repo. It reads the file and asks only for the values marked
+`sync: false`.
+
+| Variable | Value |
+|----------|-------|
+| `SPRING_DATASOURCE_URL` / `USERNAME` / `PASSWORD` | from Neon, above |
+| `GROQ_API_KEY` | the same key used locally |
+| `FRONTEND_ORIGIN` | not known yet — put `http://localhost:5173` and fix it in step 4 |
+
+`JWT_SECRET_KEY` is not asked for: Render generates a 256-bit value and keeps it, which
+is what `generateValue: true` in the blueprint means. `SPRING_PROFILES_ACTIVE=prod` and
+`PORT` are handled without asking.
+
+The first build takes several minutes, because it compiles and runs the test suite inside
+the image. Watch the logs for Flyway applying the migrations to the empty Neon database —
+that is the moment the schema is created. Then:
+
+```bash
+curl https://<your-service>.onrender.com/api/health
+```
+
+### 3. Frontend (Vercel)
+
+Import the repo, set the root directory to `frontend`, and add one environment variable:
+
+```
+VITE_API_BASE_URL = https://<your-service>.onrender.com
+```
+
+Vite inlines that at build time, not at runtime, so changing it later means redeploying
+rather than restarting.
+
+`frontend/vercel.json` rewrites every path to `index.html`. Without it, `/projects/5`
+loads fine when React Router navigates to it and 404s when the page is refreshed, because
+no such file exists — the routing lives in the bundle, and the bundle has to be served
+first.
+
+### 4. Point the backend at the frontend
+
+Set `FRONTEND_ORIGIN` on Render to the Vercel URL, with no trailing slash, and let it
+redeploy. This one value becomes both the allowed CORS origin and the preview's
+`frame-ancestors`, so until it is right, every API call fails CORS and the preview iframe
+stays blank.
+
+### What to expect on the free tier
+
+The backend sleeps after 15 minutes without traffic, and the next request spends about a
+minute waking it — on 0.1 CPU, a JVM takes noticeably longer to start than the 5.9 seconds
+it takes on a laptop. Neon's compute sleeps too, and wakes in seconds. Neither is worth
+paying to avoid, but it is worth opening the link once before showing it to anyone.
 
 ---
 
@@ -271,6 +366,7 @@ curl -s -X POST "localhost:8081/api/projects/$PROJECT_ID/preview-token" \
 ```
 Lovable_Clone/
 ├── backend/
+│   ├── Dockerfile        ← two stages; only the JRE stage ships
 │   └── src/main/
 │       ├── java/com/aibuilder/lovableclone/
 │       │   ├── account/      ← users, auth
@@ -278,8 +374,10 @@ Lovable_Clone/
 │       │   ├── generation/   ← LLM calls, output validation, generated files, chat history
 │       │   └── common/       ← security, config, exceptions
 │       └── resources/db/migration/  ← Flyway migrations, applied in version order
-├── docker-compose.yml    ← PostgreSQL
+├── docker-compose.yml    ← PostgreSQL, for local development
+├── render.yaml           ← the hosted backend, as config rather than dashboard clicks
 ├── frontend/
+│   ├── vercel.json       ← serve index.html for every path, so refresh does not 404
 │   └── src/
 │       ├── api/          ← fetch wrapper, bearer token, error mapping
 │       ├── auth/         ← session context
@@ -764,5 +862,7 @@ after deployment, where no such proxy exists.
   `jlink` with only the needed modules, or a layered jar so dependencies and application
   classes cache separately, would cut both. Neither matters until deploys are frequent
   enough for the pull to be felt
-- The frontend is dev-only: `npm run build` produces a bundle, but nothing serves it,
-  and `VITE_API_BASE_URL` is baked in at build time rather than read at runtime
+- `VITE_API_BASE_URL` is inlined into the bundle at build time, so pointing the frontend
+  at a different backend is a rebuild rather than a restart. Reading it from a small
+  runtime config the page fetches first would decouple them, at the cost of one request
+  before anything renders

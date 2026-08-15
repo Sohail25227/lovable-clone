@@ -1,0 +1,59 @@
+# Render ka Blueprint. Service dashboard mein haath se banane ke bajaye yahan likhi hai,
+# taaki galti se delete hone par hu-ba-hu wahi cheez wapas bane, aur padhne wale ko dikhe
+# ki production kis config pe chalta hai.
+#
+# Database yahan jaan-boojh ke nahi hai. Render ka free Postgres banane ke 30 din baad
+# expire hota hai aur 14 din baad data ke saath delete ho jata hai — jo cheez mahino
+# chalni chahiye uske liye woh theek nahi. Postgres Neon pe hai, aur uska connection
+# neeche env vars se aata hai.
+
+services:
+  - type: web
+    name: lovable-clone-api
+    runtime: docker
+    plan: free
+
+    # India se sabse paas. Render service ka region baad mein badalne nahi deta —
+    # badalne ka matlab nayi service banana hai, isliye yeh shuru mein hi sahi hona chahiye.
+    # Neon ka project bhi isi region (Singapore) mein hona chahiye, warna har query
+    # aadhi duniya ka chakkar lagayegi
+    region: singapore
+
+    # Build context backend/ hai, repo root nahi. Isse frontend ka source image ke
+    # context mein aata hi nahi, aur backend/.dockerignore wahin lagti hai jahan use lagna hai
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+
+    # Deploy ke waqt Render yahan poochta hai ki app zinda hui ya nahi, aur na hone par
+    # purani copy chalti rehti hai. Yeh service ko jagaye nahi rakhta: free service 15
+    # minute bina traffic ke so jati hai, aur usse jagaye rakhne ka matlab 750 free
+    # instance hours mahine ke beech mein khatam kar lena hai
+    healthCheckPath: /api/health
+
+    envVars:
+      - key: SPRING_PROFILES_ACTIVE
+        value: prod
+
+      # sync: false ka matlab: value repo mein nahi jaati, Render pehli baar dashboard
+      # mein poochta hai. Yeh teeno Neon ke connection details hain
+      - key: SPRING_DATASOURCE_URL
+        sync: false
+      - key: SPRING_DATASOURCE_USERNAME
+        sync: false
+      - key: SPRING_DATASOURCE_PASSWORD
+        sync: false
+
+      - key: GROQ_API_KEY
+        sync: false
+
+      # Frontend ki origin. Ek hi value se CORS ki allowed origin aur preview ka
+      # frame-ancestors dono bante hain, isliye Vercel ka URL milte hi yeh bharna hai —
+      # bina iske frontend se har API call CORS pe rukegi
+      - key: FRONTEND_ORIGIN
+        sync: false
+
+      # Render khud ek 256-bit random value banata hai aur usse yaad rakhta hai. Local
+      # wali key production mein bhejne ki koi wajah nahi. Ise kabhi badla to sab purane
+      # token ek saath invalid ho jayenge — jo theek hai, sirf dobara login karna padega
+      - key: JWT_SECRET_KEY
+        generateValue: true
