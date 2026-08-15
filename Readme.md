@@ -6,6 +6,12 @@ A from-scratch implementation of an AI-powered app builder, built as a learning
 and portfolio project. Backend-first, with a deliberate path from modular
 monolith to microservices.
 
+**Live:** [lovable-clone-indol.vercel.app](https://lovable-clone-indol.vercel.app) ·
+API at [lovable-clone-api.onrender.com](https://lovable-clone-api.onrender.com/api/health)
+
+Both run on free plans, so the first request after a quiet spell wakes the backend
+and takes about a minute. Everything after that is normal speed.
+
 ---
 
 ## Status
@@ -27,7 +33,7 @@ monolith to microservices.
 | 7c | Generation claims expire, so a crash cannot brick a project | Done |
 | 8 | Backend containerised, production profile, image verified end to end | Done |
 | 8b | Deployment config: Render blueprint, Vercel SPA rewrite | Done |
-| 8c | Hosted: Neon Postgres, backend on Render, frontend on Vercel | In progress |
+| 8c | Hosted: Neon Postgres, backend on Render, frontend on Vercel | Done |
 | 9+ | File storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
@@ -239,9 +245,38 @@ stays blank.
 ### What to expect on the free tier
 
 The backend sleeps after 15 minutes without traffic, and the next request spends about a
-minute waking it — on 0.1 CPU, a JVM takes noticeably longer to start than the 5.9 seconds
-it takes on a laptop. Neon's compute sleeps too, and wakes in seconds. Neither is worth
-paying to avoid, but it is worth opening the link once before showing it to anyone.
+minute waking it. Neon's compute sleeps too, and wakes in seconds. Neither is worth paying
+to avoid, but it is worth opening the link once before showing it to anyone.
+
+### What the first deploy actually showed
+
+The build took four minutes and the app came up on the first attempt, which was mostly
+luck of the preparation rather than luck: the two things that would have broken it had
+already been fixed while containerising.
+
+Three lines in the startup log are worth reading, because each one is a decision paying
+off:
+
+- `Tomcat started on port 10000`. Render picks the port and passes it in `PORT`. Had the
+  config kept its hardcoded `8081`, Render would have scanned, found nothing listening,
+  and killed the service — the `No open ports detected, continuing to scan...` line is
+  that scan, ending the moment Tomcat bound.
+- `All configured schemas are empty; baseline operation skipped`, then `Migrating schema
+  "public" to version "1 - initial schema"`. Because the database was untouched, Flyway
+  ran V1 rather than baselining over it. This is the concrete reason to refuse anything
+  that pre-creates tables: with a non-empty schema and no history table,
+  `baseline-on-migrate` would have marked it as already at V1, skipped it, and left V2
+  altering a table that was never created.
+- `Started LovableCloneApplication in 139.6 seconds`, against 5.9 locally. That is 0.1
+  CPU, and it is the honest cost of the free tier. A second deploy logged `Schema
+  "public" is up to date. No migration necessary.`, which is the migrations proving they
+  are idempotent.
+
+One thing this network could not verify at any point: the corporate proxy re-signs TLS
+and drops Postgres connections, so neither Groq nor Neon could be reached from the laptop,
+in a container or out of it. Both worked on the first try from Render, which does not sit
+behind it. Local verification stopped at "the container boots and serves HTTP"; the rest
+was verified in the environment that actually has to run it.
 
 ---
 
@@ -763,6 +798,14 @@ untrusted code this product exists to run cannot read that key.
 status code, because the useful part is what the backend already said — the rate-limit
 wait, or which contract rules the model broke. A generic "Something went wrong" per
 status would discard exactly the information the user needs.
+
+**On a phone the two panes take turns.** The builder is a 384px sidebar beside a preview,
+which is a desktop shape: a phone is about 390px wide, so the sidebar took the screen and
+the preview was squeezed to nothing. Sending a prompt appeared to do nothing, because the
+app it produced was in a pane with no width. Below the `md` breakpoint they are now one at
+a time, switched by a chat/app toggle, and generating switches to the app — otherwise the
+result still lands somewhere the user is not looking. Shrinking both to fit was never the
+alternative; at that width, half of each is neither.
 
 **The image is built in two stages, and only the second one ships.** Building needs a JDK
 and Maven; running needs a JRE. Keeping one stage would leave Maven, the source and a
