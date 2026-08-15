@@ -87,6 +87,20 @@
     <groupId>org.springframework.ai</groupId>
     <artifactId>spring-ai-starter-model-openai</artifactId>
 </dependency>
+<!-- Boot 4 ne autoconfiguration ko alag modules mein toda hai: spring-boot-autoconfigure
+     mein Flyway ki ek bhi class nahi hai. Sirf flyway-core daalne pe migrations chupchaap
+     nahi chalti — app theek boot hota hai aur history table bhi nahi banti.
+     Yeh starter woh autoconfiguration laata hai, aur flyway-core saath aata hai -->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-flyway</artifactId>
+</dependency>
+<!-- Flyway 10 se har database ka support apne module mein hai, aur starter usse
+     nahi laata. Iske bina boot pe "Unsupported Database: PostgreSQL" milta hai -->
+<dependency>
+    <groupId>org.flywaydb</groupId>
+    <artifactId>flyway-database-postgresql</artifactId>
+</dependency>
     </dependencies>
 
     <build>

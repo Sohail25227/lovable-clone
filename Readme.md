@@ -23,17 +23,18 @@ monolith to microservices.
 | 6d | Prompt history, follow-up prompts refining an existing app | Done |
 | 6e | Generation interlock, bounded retry budget | Done |
 | 7 | React frontend: auth, projects, builder with live preview | Done |
-| 8+ | Flyway, deploy, file storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
+| 7b | Flyway owns the schema, Hibernate only validates it | Done |
+| 8+ | Deploy, file storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
 
 ## Stack
 
 **Current:** Java 17 · Spring Boot 4.0.0 · Spring Security · Spring Data JPA ·
-PostgreSQL 16 · JJWT · Spring AI 2.0 · Groq (Llama 3.3 70B) · Docker Compose ·
-React 19 · Vite 8 · Tailwind 4 · React Router 7
+PostgreSQL 16 · Flyway 11 · JJWT · Spring AI 2.0 · Groq (Llama 3.3 70B) ·
+Docker Compose · React 19 · Vite 8 · Tailwind 4 · React Router 7
 
-**Planned:** Flyway · Redis · MinIO · Qdrant · Kubernetes (k3s)
+**Planned:** Redis · MinIO · Qdrant · Kubernetes (k3s)
 
 Groq is reached through the OpenAI-compatible starter, so the provider is a
 `base-url` change rather than a code change.
@@ -85,7 +86,7 @@ mvn -s .mvn/settings.xml spring-boot:run
 
 App starts on **http://localhost:8081**.
 
-Hibernate runs with `ddl-auto: update`, so tables are created on first boot.
+Flyway builds the schema on first boot, so an empty database is enough to start.
 
 > When behaviour doesn't match the source, run `mvn clean spring-boot:run`.
 > The IDE's compiler and Maven both write to `target/classes`, so a save
@@ -236,11 +237,13 @@ curl -s -X POST "localhost:8081/api/projects/$PROJECT_ID/preview-token" \
 ```
 Lovable_Clone/
 ├── backend/
-│   └── src/main/java/com/aibuilder/lovableclone/
-│       ├── account/      ← users, auth
-│       ├── workspace/    ← projects
-│       ├── generation/   ← LLM calls, output validation, generated files, chat history
-│       └── common/       ← security, config, exceptions
+│   └── src/main/
+│       ├── java/com/aibuilder/lovableclone/
+│       │   ├── account/      ← users, auth
+│       │   ├── workspace/    ← projects
+│       │   ├── generation/   ← LLM calls, output validation, generated files, chat history
+│       │   └── common/       ← security, config, exceptions
+│       └── resources/db/migration/  ← Flyway migrations, applied in version order
 ├── docker-compose.yml    ← PostgreSQL
 ├── frontend/
 │   └── src/
@@ -253,6 +256,10 @@ Lovable_Clone/
 
 Each feature package owns its own `controller` / `service` / `repository` /
 `entity` / `dto` layers.
+
+Changing an entity means writing the matching `V2__...sql`, `V3__...sql` and so on
+in the same commit. Nothing generates them, and `ddl-auto: validate` fails the boot
+if one is missing — which is the point.
 
 Run the tests with `mvn -s .mvn/settings.xml test` from `backend/`. They need
 neither Postgres nor a Groq key.
@@ -288,6 +295,30 @@ it. The safe case is the default.
 
 **Enums persist as strings.** `@Enumerated(EnumType.STRING)` — the default
 `ORDINAL` corrupts existing rows the moment an enum constant is reordered.
+
+**Flyway owns the schema; Hibernate only validates it.** Days 1–6 ran on
+`ddl-auto: update`, which is convenient and wrong for anything deployed: it
+infers changes from a diff, never drops or narrows anything, and does it all
+silently. It also emitted SQL Postgres rejected outright — adding `version` to
+the populated `projects` table produced `not null` with no default, and the
+column had to be added by hand. `db/migration/V1__initial_schema.sql` is the
+current schema as one baseline; every change after it is a new numbered file.
+`ddl-auto` is now `validate`, so a drifted entity fails at boot instead of
+quietly reshaping the database.
+
+Existing databases are covered by `baseline-on-migrate`, which records them at
+V1 rather than refusing to touch a schema Flyway didn't create. On an empty
+database that flag does nothing and V1 simply runs — which is what a fresh
+deploy does, and what was tested. Applied migrations are effectively immutable:
+Flyway checksums them, and appending a single comment to V1 is enough to stop
+the next boot.
+
+> **Boot 4 gotcha.** `flyway-core` on its own does nothing here. Boot 4 split
+> autoconfiguration into per-technology modules, and `spring-boot-autoconfigure`
+> no longer contains a single Flyway class — the app boots clean, runs no
+> migrations, and creates no history table. `spring-boot-starter-flyway` is what
+> brings the autoconfiguration. Postgres support is a second dependency
+> (`flyway-database-postgresql`), separate since Flyway 10.
 
 **Concurrent writes fail loudly, they don't overwrite.** `ProjectEntity` carries a
 `@Version` field, so Hibernate appends `and version = ?` to every update and a
@@ -590,13 +621,8 @@ status would discard exactly the information the user needs.
   tab or a killed process, the page keeps showing that until it is reloaded
 - `generate` is not idempotent — a retried HTTP request bills a fresh generation.
   An idempotency key would fix it
-- Schema changes to populated tables have to be applied by hand. Adding the
-  `version` column needed `alter table projects add column version bigint not
-  null default 0` first, because `ddl-auto: update` emits it without a default
-  and Postgres rejects that on a non-empty table. This is the concrete cost of
-  the missing migration tool below
-- `ddl-auto: update` instead of a migration tool (Flyway/Liquibase). This is the one
-  blocker for deploying: letting Hibernate alter a production schema is not an option
+- Migrations are only ever applied forward. There is no `undo` (that is Flyway's paid
+  tier), so a bad migration is fixed by writing the next one
 - No refresh tokens or token revocation, so an expired token means a silent bounce to
   the login screen mid-session
 - No rate limiting on auth endpoints
