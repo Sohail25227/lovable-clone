@@ -33,6 +33,7 @@ public class CodeGenerationService {
               It is not a stylesheet, so never load it with a link tag
             - React 18 and ReactDOM 18 UMD builds from unpkg
             - Babel standalone from unpkg
+            - styles.css, as <link rel="stylesheet" href="styles.css">
             - a div whose id is root
             - a script tag with type text/babel and src app.jsx
 

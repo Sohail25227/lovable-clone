@@ -22,6 +22,7 @@ class GeneratedAppValidatorTest {
               <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
               <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
               <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+              <link rel="stylesheet" href="styles.css">
             </head><body>
               <div id="root"></div>
               <script type="text/babel" src="app.jsx"></script>
@@ -111,6 +112,16 @@ class GeneratedAppValidatorTest {
 
         assertThat(validator.validate(app(VALID_HTML, "", "")))
                 .anyMatch(violation -> violation.contains("app.jsx is empty"));
+    }
+
+    // Yeh galti prompt mein thi: styles.css maangi jaati thi par link karne ko
+    // kaha hi nahi gaya tha, to file store hoti thi aur app use load hi nahi karti thi
+    @Test
+    void rejectsAnUnlinkedStylesheet() {
+        String html = VALID_HTML.replace("<link rel=\"stylesheet\" href=\"styles.css\">", "");
+
+        assertThat(validator.validate(app(html, VALID_JSX, "body {}")))
+                .anyMatch(violation -> violation.contains("never links styles.css"));
     }
 
     @Test

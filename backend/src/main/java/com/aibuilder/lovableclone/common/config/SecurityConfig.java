@@ -27,7 +27,10 @@ public class SecurityConfig {
             .sessionManagement(session ->
                     session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                    .requestMatchers("/api/auth/**", "/api/health").permitAll()
+                    // Preview browser se khulta hai, jahan Authorization header nahi
+                    // ja sakta. Yahan permission signed token se aati hai, jise
+                    // PreviewController khud verify karta hai
+                    .requestMatchers("/api/auth/**", "/api/health", "/api/preview/**").permitAll()
                     .anyRequest().authenticated()
                 ).addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
 

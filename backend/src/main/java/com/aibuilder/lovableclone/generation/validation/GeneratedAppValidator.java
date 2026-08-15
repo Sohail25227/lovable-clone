@@ -117,6 +117,10 @@ public class GeneratedAppValidator {
         if (!html.contains(APP_JSX)) {
             violations.add("index.html never references app.jsx");
         }
+        // Bina iske styles.css generate hoti, store hoti, aur kabhi load nahi hoti
+        if (!html.contains(STYLES_CSS)) {
+            violations.add("index.html never links styles.css, so the file is generated and ignored");
+        }
     }
 
     private void validateAppJsx(String jsx, List<String> violations) {

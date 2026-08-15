@@ -19,7 +19,8 @@ monolith to microservices.
 | 5 | Spring AI + Groq, prompt → runnable app via structured output | Done |
 | 6 | Persist generated files, status transitions, optimistic locking | Done |
 | 6b | Validate generated output, retry once on violations | Done |
-| 6c | Prompt history, follow-up prompts, live preview | Next |
+| 6c | Live preview: generated apps run in the browser | Done |
+| 6d | Prompt history, follow-up prompts | Next |
 | 7+ | File storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
@@ -116,6 +117,17 @@ Send `Authorization: Bearer <token>`.
 | `DELETE` | `/api/projects/{id}` | Delete project (`204`) |
 | `POST` | `/api/projects/{id}/generate` | Prompt → generated app (`200`) |
 | `GET` | `/api/projects/{id}/files` | Stored files for a project |
+| `POST` | `/api/projects/{id}/preview-token` | Mint a 30-minute preview URL |
+
+### Preview
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/preview/{token}/` | The generated `index.html` |
+| `GET` | `/api/preview/{token}/{file}` | Any stored file for that project |
+
+No `Authorization` header — the signed token in the path is the credential. Paste
+the `previewUrl` from `preview-token` into a browser and the app runs.
 
 `generate` takes `{"prompt": "..."}` and returns an app that runs in a browser
 with no build step:
@@ -171,6 +183,10 @@ curl -s -X POST "localhost:8081/api/projects/$PROJECT_ID/generate" \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"A todo app with add, complete, filter and delete."}'
+
+# Then open the app in a browser
+curl -s -X POST "localhost:8081/api/projects/$PROJECT_ID/preview-token" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
@@ -257,6 +273,35 @@ run in an `iframe`, which rules out a build step, which rules out `import`
 statements and `package.json`. So the model is constrained to CDN-loaded React
 with in-browser Babel. The downstream constraint decides the upstream contract.
 
+**The preview token lives in the path, not the query string.** A browser
+navigating to a URL cannot attach an `Authorization` header, so the preview needs
+a credential the URL itself carries. A query parameter looks like the obvious
+choice and quietly fails: `index.html` loads, but the `src="app.jsx"` inside it
+resolves the path and **drops the query**, so the sub-resource arrives
+unauthenticated. As a path prefix, relative resolution carries the token along for
+free.
+
+**Both token types check their own scope.** A preview token's subject is a
+project id; an access token's subject is a user id. Without a `scope` claim
+checked in both directions, a preview token — which is visible in URLs, history
+and logs — passed as `Authorization: Bearer` would have its project id read back
+as a user id. The confusion is silent and grants the wrong thing, so each parser
+refuses the other's tokens. The token also carries `ownerId`, which lets preview
+reads go through the same ownership-checked query as `GET /files` instead of
+needing an unguarded one.
+
+**Malformed tokens are 401, not 500.** JJWT throws for a bad signature, bad
+encoding and expiry alike, and none of those were mapped, so a typo'd token
+reached the catch-all and answered `500`. Parsing is now wrapped once, in the one
+place that parses.
+
+**Previews are served with a CSP, and that is a mitigation rather than a fix.**
+Model-written HTML and JavaScript run from our own origin, which is stored XSS by
+construction. Scripts are restricted to the two CDNs the contract requires, but
+`unsafe-eval` cannot be dropped, because in-browser Babel is what compiles the
+JSX. The real fix is a separate origin per project; that is why hosted builders
+serve previews from their own domain.
+
 **Generated code is validated, because prompt rules are requests and not
 guarantees.** Tightening the prompt fixed five defects on Day 5 and new ones
 appeared anyway — one reply spelled the global `ReactDom`, which is `undefined`
@@ -311,6 +356,15 @@ become an HTTP call during a service split; a repository call cannot.
 ## Known gaps
 
 - `GeneratedAppValidator` is the only tested class; nothing else has tests
+- Every preview shares one origin, so generated apps share `localStorage`. A
+  regenerated counter opened at 1 instead of 0, having inherited the previous
+  app's saved state. Per-project origins are the fix, and they are also what
+  would contain the XSS noted above
+- A preview token cannot be revoked before it expires, and anyone holding the URL
+  can open it. Thirty minutes is the only bound
+- Using a preview token on the API answers `403` where `401` would be right. The
+  filter clears the context and Spring Security then reports it as anonymous
+  access denied rather than failed authentication
 - Validation covers what breaks the app, not whether it does what was asked. A
   request for "increment and reset" came back with increment and *decrement*, and
   no string match catches that
