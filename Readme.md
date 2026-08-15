@@ -17,7 +17,8 @@ monolith to microservices.
 | 3 | JWT auth (signup / login / me), global error handling | Done |
 | 4 | Project CRUD with ownership enforcement | Done |
 | 5 | Spring AI + Groq, prompt → runnable app via structured output | Done |
-| 6 | Persist generated files and prompt history, live preview | Next |
+| 6 | Persist generated files, status transitions, optimistic locking | Done |
+| 6b | Prompt history, follow-up prompts, live preview | Next |
 | 7+ | File storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
@@ -113,6 +114,7 @@ Send `Authorization: Bearer <token>`.
 | `GET` | `/api/projects/{id}` | Get one project |
 | `DELETE` | `/api/projects/{id}` | Delete project (`204`) |
 | `POST` | `/api/projects/{id}/generate` | Prompt → generated app (`200`) |
+| `GET` | `/api/projects/{id}/files` | Stored files for a project |
 
 `generate` takes `{"prompt": "..."}` and returns an app that runs in a browser
 with no build step:
@@ -129,7 +131,13 @@ with no build step:
 }
 ```
 
-Expect 3–10 seconds per call. The response is **not persisted yet** (Day 6).
+Expect 3–20 seconds per call. Files are stored against the project, so `GET
+/files` returns them afterwards, and regenerating replaces the previous set.
+The project's status moves `DRAFT → GENERATING → READY`, or to `FAILED` if the
+model call throws.
+
+A write that races another write on the same project returns **409** instead of
+silently overwriting it (see optimistic locking below).
 
 Errors return a consistent shape:
 
@@ -214,6 +222,25 @@ it. The safe case is the default.
 **Enums persist as strings.** `@Enumerated(EnumType.STRING)` — the default
 `ORDINAL` corrupts existing rows the moment an enum constant is reordered.
 
+**Concurrent writes fail loudly, they don't overwrite.** `ProjectEntity` carries a
+`@Version` field, so Hibernate appends `and version = ?` to every update and a
+stale write matches zero rows. The obvious alternative, `@DynamicUpdate`, only
+narrows the window — it writes fewer columns but still lets two writers touching
+the same column clobber each other, and it costs the prepared-statement cache,
+since each dirty-column combination compiles to a different SQL string.
+Versioning closes the window instead of shrinking it. The resulting
+`OptimisticLockingFailureException` maps to **409**, not 500: the caller did
+nothing wrong and can retry. Spring's exception is the one caught, not JPA's, so
+no persistence type leaks into the web layer.
+
+Verified by holding the row in an uncommitted `psql` transaction and firing a
+generate: the request returned 409, the other writer's change survived, and the
+model was never called — the conflict surfaces on the first status update, ahead
+of the expensive work. Worth knowing what this does *not* cover: a writer that
+bypasses Hibernate and leaves `version` untouched defeats the check entirely, and
+the full-column update then writes stale values back over it. Optimistic locking
+is a protocol, and every writer has to be in it.
+
 **Errors are centralised.** A single `@RestControllerAdvice` maps domain
 exceptions to status codes and returns a uniform `ApiErrorDto`. Unexpected
 exceptions are logged with a stack trace but respond with a generic message,
@@ -257,9 +284,19 @@ become an HTTP call during a service split; a repository call cannot.
 ## Known gaps
 
 - No automated tests yet
-- Generated files and prompts are not persisted — a response is lost once read
-- No conversation history, so follow-up prompts ("make the header blue")
-  cannot work yet
+- Prompts are not persisted, only the files they produced, so there is no history
+  to build follow-up prompts ("make the header blue") from
+- Nothing stops two generations running on the same project at once. Optimistic
+  locking makes the *writes* safe but is not an interlock: each status update
+  reloads the row in its own short transaction, so a double-clicked button still
+  fires two model calls and burns quota twice. The fix is a compare-and-set —
+  `set status = 'GENERATING' where id = ? and status <> 'GENERATING'`, then check
+  the affected row count
+- Schema changes to populated tables have to be applied by hand. Adding the
+  `version` column needed `alter table projects add column version bigint not
+  null default 0` first, because `ddl-auto: update` emits it without a default
+  and Postgres rejects that on a non-empty table. This is the concrete cost of
+  the missing migration tool below
 - Spring AI retries `429`s out of the box, but its defaults are too generous for
   a synchronous endpoint: 10 attempts with backoff capped at 3 minutes can block
   a request thread for roughly 19 minutes. The free tier allows about seven

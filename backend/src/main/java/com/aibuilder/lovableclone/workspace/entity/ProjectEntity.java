@@ -13,6 +13,7 @@ import jakarta.persistence.Index;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 
 @Entity
 @Table(name = "projects", indexes = {
@@ -45,6 +46,13 @@ public class ProjectEntity {
 
     @Column(nullable = false)
     private Instant updatedAt;
+
+    // Hibernate UPDATE ke WHERE mein version jodta hai, to do saath ke writes mein
+    // doosra fail hota hai — pehle wala chupke se overwrite nahi hota.
+    // Long, primitive nahi: null se naya entity aur detached entity alag pehchane jaate hain
+    @Version
+    @Column(nullable = false)
+    private Long version;
 
     @PrePersist
     protected void onCreate() {
@@ -126,5 +134,10 @@ public class ProjectEntity {
 
     public void setUpdatedAt(Instant updatedAt) {
         this.updatedAt = updatedAt;
+    }
+
+    // Getter only — version Hibernate ka hai, koi caller ise set na kare
+    public Long getVersion() {
+        return version;
     }
 }

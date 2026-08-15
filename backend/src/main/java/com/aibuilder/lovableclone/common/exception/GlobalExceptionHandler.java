@@ -5,6 +5,7 @@ import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -45,6 +46,14 @@ public class GlobalExceptionHandler {
         String message = ex.getMessage();
 
         return build(HttpStatus.NOT_FOUND, message);
+    }
+
+    // Do requests ne ek hi row saath mein badli. Spring ka exception catch karte hain,
+    // JPA ka nahi, taaki web layer persistence-specific type pe depend na kare
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ResponseEntity<ApiErrorDto> handleOptimisticLock(OptimisticLockingFailureException ex) {
+        log.warn("Concurrent modification: {}", ex.getMessage());
+        return build(HttpStatus.CONFLICT, "Project was modified by another request, please retry");
     }
 
     // Koi bhi unexpected exception — last safety net
