@@ -1,5 +1,6 @@
 package com.aibuilder.lovableclone.workspace.service;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 
@@ -17,6 +18,17 @@ import com.aibuilder.lovableclone.workspace.repository.ProjectRepository;
 @Service
 @Transactional(readOnly = true)
 public class ProjectService {
+
+    /**
+     * Claim kitni der zinda maana jaye.
+     *
+     * Yeh sabse lambi jaayaz generation se bada hona chahiye, warna ek slow-par-zinda
+     * generation doosri request cheen legi aur dono ek hi project ki files likhengi —
+     * theek wahi cheez jise interlock rokta hai. Worst case: do validation attempts,
+     * har ek mein SDK ki teen tries x 45s timeout, yaani ~4.5 minute. 10 minute usse
+     * aaram se ooper hai, aur atke hue project ko theek hone mein itni hi der lagti hai.
+     */
+    private static final Duration GENERATION_LEASE = Duration.ofMinutes(10);
 
     private final ProjectRepository projectRepository;
 
@@ -80,16 +92,21 @@ public class ProjectService {
     }
 
     /**
-     * GENERATING pe daawa karta hai, sirf tab jab project abhi GENERATING na ho.
+     * GENERATING pe daawa karta hai, sirf tab jab koi zinda claim maujood na ho.
      *
      * Optimistic locking writes ko safe banata hai par interlock nahi hai: do requests
      * apni-apni transaction mein row padh ke dono GENERATING likh sakti hain aur dono
      * model call kar sakti hain. Yeh check DB mein hota hai, isliye do mein se ek harta hai.
+     *
+     * Claim ke saath lease hai, kyunki iske bina ek crash project ko hamesha ke liye
+     * bekaar kar deta tha: status GENERATING pe atka rehta aur har agli koshish 409 hoti.
      */
     @Transactional
     public void claimForGeneration(Long projectId, Long ownerId) {
-        int claimed = projectRepository.compareAndSetStatus(
-                projectId, ownerId, ProjectStatusEnum.GENERATING, Instant.now());
+        Instant now = Instant.now();
+
+        int claimed = projectRepository.claimStatus(projectId, ownerId,
+                ProjectStatusEnum.GENERATING, now, now.minus(GENERATION_LEASE));
 
         if (claimed == 1) {
             return;

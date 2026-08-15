@@ -41,6 +41,12 @@ public class ProjectEntity {
     @Column(name = "preview_url")
     private String previewUrl;
 
+    // Maujooda claim kab liya gaya. Sirf GENERATING ke saath maani rakhta hai: usse pata
+    // chalta hai ki claim zinda hai ya us process ke saath mar gaya. Nullable, kyunki
+    // jinhone kabhi generate nahi kiya unke paas batane ko kuch nahi
+    @Column(name = "generation_started_at")
+    private Instant generationStartedAt;
+
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -118,6 +124,10 @@ public class ProjectEntity {
 
     public void setPreviewUrl(String previewUrl) {
         this.previewUrl = previewUrl;
+    }
+
+    public Instant getGenerationStartedAt() {
+        return generationStartedAt;
     }
 
     public Instant getCreatedAt() {

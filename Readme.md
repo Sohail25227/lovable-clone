@@ -24,6 +24,7 @@ monolith to microservices.
 | 6e | Generation interlock, bounded retry budget | Done |
 | 7 | React frontend: auth, projects, builder with live preview | Done |
 | 7b | Flyway owns the schema, Hibernate only validates it | Done |
+| 7c | Generation claims expire, so a crash cannot brick a project | Done |
 | 8+ | Deploy, file storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
@@ -368,6 +369,26 @@ fire, so `updatedAt` is set in the statement. And Hibernate does not touch `vers
 which is exactly the hole documented above — a writer outside the protocol lets a
 stale entity elsewhere still look fresh, so the increment is written by hand.
 
+**A claim without an expiry is a way to lose a project permanently.** The first
+version of the interlock only asked whether the project was already `GENERATING`,
+which assumes the holder eventually finishes. Kill the process mid-generation and it
+never does: the row stays `GENERATING`, every later `generate` answers 409, and there
+is no API that can undo it. Deploying makes this likely rather than theoretical,
+since free hosts idle out and restart containers, and a generation holds a request
+thread for up to a few minutes.
+
+A claim now carries `generation_started_at` (V2), and one older than ten minutes can
+be taken over. The lease has to exceed the longest *legitimate* generation — two
+validation attempts at up to three model calls each — because stealing a claim from a
+worker that is merely slow means two model calls racing to write the same project's
+files. Ten minutes clears a worst case of about four and a half.
+
+A null timestamp counts as stale, which is what heals the rows that were already
+stuck when the column was added: no repair script, and no status the application
+cannot reach. Verified on all three: a claim 30 seconds old still answers 409, one 11
+minutes old is taken over, and a stuck row with no timestamp generated successfully
+on the next attempt.
+
 **Ownership and interlock in one statement, not two.** The owner check used to be a
 separate `getProjectById` before the status update. Folding `owner_id` into the
 claim's `where` clause removes a query and the window between checking and acting.
@@ -631,9 +652,10 @@ status would discard exactly the information the user needs.
 - Validation covers what breaks the app, not whether it does what was asked. A
   request for "increment and reset" came back with increment and *decrement*, and
   no string match catches that
-- The interlock has no lease, so a process killed mid-generation leaves the project
-  stuck in `GENERATING` and every later `generate` answers 409 forever. A claim
-  should carry a timestamp and expire, so a stale one can be taken over
+- A claim expires after ten minutes, so a crash costs the user that long before the
+  project can be generated again. A worker that renewed its lease while alive, or a
+  job queue that noticed the worker die, would make the wait proportional to the
+  actual failure rather than to the worst legitimate generation
 - The assistant's stored message is the app's summary, so it records what the app
   *is* rather than what the turn *changed*. A functional change shows up (adding a
   filter widened the summary) but a cosmetic one does not — after "make it purple"
