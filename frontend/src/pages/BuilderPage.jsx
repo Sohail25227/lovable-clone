@@ -16,6 +16,11 @@ export default function BuilderPage() {
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState(null)
 
+  // Sirf chhoti screens ke liye. Phone pe dono panes side by side nahi aa sakte: sidebar
+  // 384px ka hai aur phone 390px ka, to preview zero chaudai pe nichud jata tha aur user
+  // ko dikhta hi nahi tha. md se ooper yeh value bekar hai, kyunki wahan dono dikhte hain
+  const [pane, setPane] = useState('chat')
+
   // Preview token 30 min mein expire hota hai, isliye woh maanga jata hai — sambhala nahi
   // jata. Har generate ke baad naya, kyunki purana URL purani files nahi, cached response
   // dikha sakta hai
@@ -90,6 +95,10 @@ export default function BuilderPage() {
       await api.generate(projectId, prompt)
       setPrompt('')
       await load()
+
+      // Phone pe user chat pane pe khada hai aur uski bani hui app doosre pane mein hai.
+      // Use wahan khud jaane dena matlab yeh maan lena ki use pata hai ki app ban chuki hai
+      setPane('app')
     } catch (failure) {
       setError(failure)
       // Fail hone pe bhi state badal chuki hoti hai: prompt history mein likha ja chuka
@@ -111,16 +120,37 @@ export default function BuilderPage() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center gap-4 border-b border-[var(--color-edge)] px-5 py-3">
-        <Link to="/projects" className="text-sm text-slate-500 hover:text-slate-300">
-          ← Projects
-        </Link>
-        <h1 className="flex-1 truncate font-medium text-slate-100">{project.name}</h1>
-        <StatusBadge status={project.status} hasFiles={files.length > 0} />
+      <header className="border-b border-[var(--color-edge)]">
+        <div className="flex items-center gap-4 px-5 py-3">
+          <Link to="/projects" className="text-sm text-slate-500 hover:text-slate-300">
+            ← Projects
+          </Link>
+          <h1 className="flex-1 truncate font-medium text-slate-100">{project.name}</h1>
+          <StatusBadge status={project.status} hasFiles={files.length > 0} />
+        </div>
+
+        {/* Chhoti screen pe dono panes ke beech jaane ka ekmatra raasta */}
+        <div className="flex gap-1 px-4 pb-2 md:hidden">
+          {['chat', 'app'].map((name) => (
+            <button
+              key={name}
+              onClick={() => setPane(name)}
+              className={`flex-1 rounded-md px-3 py-1.5 text-sm capitalize ${
+                pane === name ? 'bg-white/10 text-slate-100' : 'text-slate-500'
+              }`}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-96 flex-col border-r border-[var(--color-edge)]">
+        <aside
+          className={`${
+            pane === 'chat' ? 'flex' : 'hidden'
+          } w-full flex-col md:flex md:w-96 md:border-r md:border-[var(--color-edge)]`}
+        >
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
             {messages.length === 0 && (
               <p className="text-sm text-slate-500">
@@ -164,7 +194,9 @@ export default function BuilderPage() {
           </form>
         </aside>
 
-        <main className="flex min-w-0 flex-1 flex-col">
+        <main
+          className={`${pane === 'app' ? 'flex' : 'hidden'} min-w-0 flex-1 flex-col md:flex`}
+        >
           <div className="flex items-center gap-1 border-b border-[var(--color-edge)] px-4 py-2">
             {['preview', 'code'].map((name) => (
               <button
