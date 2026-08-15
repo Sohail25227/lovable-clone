@@ -11,6 +11,8 @@ import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.stereotype.Service;
 
 import com.aibuilder.lovableclone.common.exception.GenerationFailedException;
+import com.aibuilder.lovableclone.common.exception.ModelRateLimitedException;
+import com.openai.errors.RateLimitException;
 import com.aibuilder.lovableclone.generation.dto.ChatMessageResponseDto;
 import com.aibuilder.lovableclone.generation.dto.GeneratedAppDto;
 import com.aibuilder.lovableclone.generation.dto.GeneratedFileResponseDto;
@@ -211,23 +213,64 @@ public class CodeGenerationService {
         return message.toString();
     }
 
+    /**
+     * Provider ki rate limit ko ek aisi cheez banata hai jo client ko batayi ja sakti hai.
+     *
+     * Bina iske yeh SDK exception catch-all tak pahunchti hai aur 500 "Something went wrong"
+     * ban jaati hai — jo jhoot hai: request theek thi aur baad mein chal jayegi. Free tier pe
+     * yeh aam haal hai, aur UI ko farq batana hi hai.
+     *
+     * SDK ka apna retry pehle ho chuka hota hai (spring.ai.openai.max-retries), isliye yahan
+     * dobara koshish nahi hoti. Groq per-minute aur per-day dono limit deta hai, aur "kitni der"
+     * ka jawab sirf retry-after mein hota hai — provider ka prose message parse karna bhangur hai
+     */
+    private ModelRateLimitedException asRateLimited(RateLimitException ex) {
+        // Provider ka message org id jaisi cheezein rakhta hai, isliye woh log mein jata hai,
+        // response mein nahi
+        log.warn("Model provider rate limited the request: {}", ex.getMessage());
+
+        return ex.headers().values("retry-after").stream()
+                .findFirst()
+                .map(this::describeWait)
+                .map(wait -> new ModelRateLimitedException(
+                        "The AI provider's rate limit was reached. Try again in about " + wait + ".", ex))
+                .orElseGet(() -> new ModelRateLimitedException(
+                        "The AI provider's rate limit was reached. Try again in a few minutes.", ex));
+    }
+
+    private String describeWait(String retryAfterSeconds) {
+        try {
+            long seconds = (long) Math.ceil(Double.parseDouble(retryAfterSeconds));
+            return seconds < 90 ? seconds + " seconds" : Math.round(seconds / 60.0) + " minutes";
+        } catch (NumberFormatException notASimpleDelay) {
+            // retry-after ek HTTP date bhi ho sakta hai. Us haal mein waqt bataye bina hi kaam chalega
+            return "a few minutes";
+        }
+    }
+
     private GeneratedAppDto callModel(Long projectId, String prompt, String context,
                                       List<String> violations, int attempt) {
         log.info("Generating app for project {} (attempt {} of {})", projectId, attempt, MAX_ATTEMPTS);
         long startedAt = System.currentTimeMillis();
 
-        GeneratedAppDto app = chatClient.prompt()
-                .system(SYSTEM_PROMPT)
-                .user(userMessage(prompt, context, violations))
-                // JSON mode: provider decoding ko constrain karta hai, isliye escaping
-                // ki galti namumkin ho jati hai. maxTokens truncation ke against insurance
-                .options(OpenAiChatOptions.builder()
-                        .responseFormat(OpenAiChatModel.ResponseFormat.builder()
-                                .type(OpenAiChatModel.ResponseFormat.Type.JSON_OBJECT)
-                                .build())
-                        .maxTokens(8000))
-                .call()
-                .entity(GeneratedAppDto.class);
+        GeneratedAppDto app;
+        try {
+            app = chatClient.prompt()
+                    .system(SYSTEM_PROMPT)
+                    .user(userMessage(prompt, context, violations))
+                    // JSON mode: provider decoding ko constrain karta hai, isliye escaping
+                    // ki galti namumkin ho jati hai. maxTokens truncation ke against insurance
+                    .options(OpenAiChatOptions.builder()
+                            .responseFormat(OpenAiChatModel.ResponseFormat.builder()
+                                    .type(OpenAiChatModel.ResponseFormat.Type.JSON_OBJECT)
+                                    .build())
+                            .maxTokens(8000))
+                    .call()
+                    .entity(GeneratedAppDto.class);
+
+        } catch (RateLimitException ex) {
+            throw asRateLimited(ex);
+        }
 
         log.info("Model returned {} files for project {} in {} ms",
                 app.files().size(), projectId, System.currentTimeMillis() - startedAt);

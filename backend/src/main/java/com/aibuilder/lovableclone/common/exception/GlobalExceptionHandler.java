@@ -56,6 +56,13 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.CONFLICT, "Project was modified by another request, please retry");
     }
 
+    // Provider ki rate limit. 429 aage bhejte hain, kyunki client ke liye yeh ek hi
+    // kaam ki jaankari hai: request theek thi, thodi der baad dobara bhejo
+    @ExceptionHandler(ModelRateLimitedException.class)
+    public ResponseEntity<ApiErrorDto> handleModelRateLimited(ModelRateLimitedException ex) {
+        return build(HttpStatus.TOO_MANY_REQUESTS, ex.getMessage());
+    }
+
     // Interlock ne doosri parallel generation rok di. Retry karne layak hai, isliye 409
     @ExceptionHandler(GenerationInProgressException.class)
     public ResponseEntity<ApiErrorDto> handleGenerationInProgress(GenerationInProgressException ex) {
