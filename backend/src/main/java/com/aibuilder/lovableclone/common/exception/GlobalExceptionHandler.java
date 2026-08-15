@@ -56,6 +56,14 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.CONFLICT, "Project was modified by another request, please retry");
     }
 
+    // Request theek thi, upstream model ne bekaar output diya — isliye 502, 500 nahi.
+    // Wajah client ko bhi jaati hai, kyunki prompt badalna hi aage ka raasta hai
+    @ExceptionHandler(GenerationFailedException.class)
+    public ResponseEntity<ApiErrorDto> handleGenerationFailed(GenerationFailedException ex) {
+        log.warn("Generation rejected: {}", ex.getMessage());
+        return build(HttpStatus.BAD_GATEWAY, ex.getMessage());
+    }
+
     // Koi bhi unexpected exception — last safety net
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiErrorDto> handleUnexpected(Exception ex) {

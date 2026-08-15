@@ -18,7 +18,8 @@ monolith to microservices.
 | 4 | Project CRUD with ownership enforcement | Done |
 | 5 | Spring AI + Groq, prompt → runnable app via structured output | Done |
 | 6 | Persist generated files, status transitions, optimistic locking | Done |
-| 6b | Prompt history, follow-up prompts, live preview | Next |
+| 6b | Validate generated output, retry once on violations | Done |
+| 6c | Prompt history, follow-up prompts, live preview | Next |
 | 7+ | File storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
@@ -131,10 +132,12 @@ with no build step:
 }
 ```
 
-Expect 3–20 seconds per call. Files are stored against the project, so `GET
-/files` returns them afterwards, and regenerating replaces the previous set.
-The project's status moves `DRAFT → GENERATING → READY`, or to `FAILED` if the
-model call throws.
+Expect 3–20 seconds per call, and roughly double that when the first reply fails
+validation and is retried. Files are stored against the project, so `GET /files`
+returns them afterwards, and regenerating replaces the previous set. The
+project's status moves `DRAFT → GENERATING → READY`, or to `FAILED` if the model
+call throws or its output is unusable after the retry — that case answers **502**
+with the violations listed.
 
 A write that races another write on the same project returns **409** instead of
 silently overwriting it (see optimistic locking below).
@@ -180,7 +183,7 @@ Lovable_Clone/
 │   └── src/main/java/com/aibuilder/lovableclone/
 │       ├── account/      ← users, auth
 │       ├── workspace/    ← projects
-│       ├── generation/   ← prompts, LLM calls, generated apps
+│       ├── generation/   ← prompts, LLM calls, output validation, generated apps
 │       └── common/       ← security, config, exceptions
 ├── docker-compose.yml    ← PostgreSQL
 ├── frontend/             ← React (not started)
@@ -189,6 +192,9 @@ Lovable_Clone/
 
 Each feature package owns its own `controller` / `service` / `repository` /
 `entity` / `dto` layers.
+
+Run the tests with `mvn -s .mvn/settings.xml test` from `backend/`. They need
+neither Postgres nor a Groq key.
 
 ---
 
@@ -251,6 +257,27 @@ run in an `iframe`, which rules out a build step, which rules out `import`
 statements and `package.json`. So the model is constrained to CDN-loaded React
 with in-browser Babel. The downstream constraint decides the upstream contract.
 
+**Generated code is validated, because prompt rules are requests and not
+guarantees.** Tightening the prompt fixed five defects on Day 5 and new ones
+appeared anyway — one reply spelled the global `ReactDom`, which is `undefined`
+and takes the page down on load. So the rules that decide whether the app runs
+at all moved into `GeneratedAppValidator`: the three files exist, Tailwind is a
+script rather than a stylesheet link, Babel and both React UMD builds are
+present, there is a `#root` to mount into, `ReactDOM.createRoot` is used and the
+removed `ReactDOM.render` is not, and nothing needs a build step. A rejected
+reply is sent back with its own violations listed and gets **one** retry; if that
+also fails the request is a **502** and the project is `FAILED`. Invalid code is
+never stored, so `READY` cannot lie.
+
+Only breakage is validated, never taste. "Generous whitespace" cannot be checked
+by string matching, and failing on it would burn a retry and a slice of the free
+tier for nothing, so aesthetics stay in the prompt where a miss is survivable.
+
+The validator is the one piece here with unit tests, and deliberately so: it is a
+pure function, so its reject paths can be proven without spending a model call —
+which an end-to-end test can never do reliably, since a good reply never
+exercises them.
+
 **Response validity is enforced by the provider, not requested in the prompt.**
 Asking the model to escape a code payload into JSON strings failed
 intermittently — one unescaped quote inside JSX ends the string and the parse
@@ -283,7 +310,10 @@ become an HTTP call during a service split; a repository call cannot.
 
 ## Known gaps
 
-- No automated tests yet
+- `GeneratedAppValidator` is the only tested class; nothing else has tests
+- Validation covers what breaks the app, not whether it does what was asked. A
+  request for "increment and reset" came back with increment and *decrement*, and
+  no string match catches that
 - Prompts are not persisted, only the files they produced, so there is no history
   to build follow-up prompts ("make the header blue") from
 - Nothing stops two generations running on the same project at once. Optimistic
