@@ -3,6 +3,19 @@
 #
 # Activate karne ke liye: SPRING_PROFILES_ACTIVE=prod
 
+server:
+  tomcat:
+    threads:
+      # Default 200 hai. Yeh 512 MB ke instance pe do tarah se bekar hai: har thread ka apna
+      # stack hai, aur 200 request ek saath aa bhi jayein to unke peeche sirf 5 database
+      # connections aur ek 0.1-CPU box hai — woh queue tez jawab nahi, dheeme jawab deti hai.
+      # Generation ke waqt thread Groq ka intezar karta hai, isliye kuch thread rakhna zaruri
+      # hai; 20 ek hi user ke browser aur uske preview iframe ke liye kaafi se zyada hai
+      max: 20
+
+      # Idle pe do se zyada thread pakde rakhne ki koi wajah nahi; peak pe baaki ban jate hain
+      min-spare: 2
+
 spring:
   jpa:
     # Dev mein yeh seekhne ke liye on hai, par har query ko log karna production mein

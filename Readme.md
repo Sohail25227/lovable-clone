@@ -34,6 +34,7 @@ and takes about a minute. Everything after that is normal speed.
 | 8 | Backend containerised, production profile, image verified end to end | Done |
 | 8b | Deployment config: Render blueprint, Vercel SPA rewrite | Done |
 | 8c | Hosted: Neon Postgres, backend on Render, frontend on Vercel | Done |
+| 8d | JVM tuned to fit 512 MB after a production OOM; startup 2.4x faster | Done |
 | 9+ | File storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
@@ -247,6 +248,13 @@ stays blank.
 The backend sleeps after 15 minutes without traffic, and the next request spends about a
 minute waking it. Neon's compute sleeps too, and wakes in seconds. Neither is worth paying
 to avoid, but it is worth opening the link once before showing it to anyone.
+
+Groq's free tier is the limit that actually bites: 100,000 tokens a day for
+`llama-3.3-70b-versatile`, against roughly 10,000 per generation, which is about **ten
+builds a day**. Past that the API answers `429` with the wait until the budget refills —
+`Limit 100000, Used 95017, Requested 10003. Please try again in 1h12m17s` — and the app
+surfaces it as a `429` carrying that wait, leaving the project's existing files and status
+untouched. Worth knowing before a demo, because the quota is per day, not per session.
 
 ### What the first deploy actually showed
 
@@ -833,9 +841,7 @@ Two things only a real run could catch, both found that way:
 The container runs as `app`, not root, and reads `PORT` because hosts assign it and kill
 whatever does not listen there. `ENTRYPOINT` is `sh -c` with `exec`, so `JAVA_OPTS`
 expands *and* the JVM becomes PID 1 — without `exec` the shell keeps PID 1, `SIGTERM`
-never reaches Spring, and shutdown is a kill instead of a graceful stop. `JAVA_OPTS`
-sets `MaxRAMPercentage=75` because the JVM's default quarter of a 512 MB host is a
-128 MB heap, and Boot with JPA, Flyway and Spring AI does not start in that.
+never reaches Spring, and shutdown is a kill instead of a graceful stop.
 
 Verified against the local database with `SPRING_PROFILES_ACTIVE=prod` and `PORT=9000`:
 Flyway validated three migrations and reported the schema current, startup took 5.9
@@ -845,6 +851,52 @@ corporate proxy re-signs TLS on this network, and the container's truststore has
 reason to carry that CA. Adding it to the image would leak an internal detail into a
 public repository and would be wrong in production regardless, so generation is verified
 after deployment, where no such proxy exists.
+
+### Fitting a JVM into 512 MB
+
+`MaxRAMPercentage=75` was the first guess, reasoning only that the default quarter of
+512 MB is a 128 MB heap and Boot with JPA, Flyway and Spring AI does not start in that.
+It is the wrong number, and a deploy said so: `==> Out of memory (used over 512Mi)`,
+then a port scan that timed out on a port Tomcat had already bound, then a shutdown.
+
+The mistake is treating the container limit as a heap budget. Docker can reproduce
+Render exactly — `--memory=512m --memory-swap=512m --cpus=0.5` — and inside that
+container the JVM reports `MaxHeapSize = 402653184`: 384 MB of heap alone, before
+metaspace (no default ceiling at all), the code cache, and a 2 MB stack for every one of
+Tomcat's up-to-200 threads. Idle RSS was already 345 MB with a heap that was mostly
+empty. There was never room for the heap to reach its own ceiling.
+
+Four changes, each measured in that container rather than reasoned about:
+
+| | before | after |
+| --- | --- | --- |
+| Startup, 0.5 CPU | 46 s | 16 s |
+| Startup, 0.25 CPU | 163 s | 67 s |
+| Idle | 345 MB | 294 MB |
+| After 300 authenticated requests | ~400 MB | 357 MB |
+| Heap ceiling | 384 MB | 256 MB |
+
+- `MaxRAMPercentage=50` puts the heap ceiling at 256 MB and leaves the other 256 MB for
+  everything the heap limit does not cover
+- `MaxMetaspaceSize=128m` gives class metadata a ceiling it does not have by default.
+  Unbounded, growth there kills the container silently; bounded, it is a legible
+  `OutOfMemoryError: Metaspace`
+- `Xss512k` takes thread stacks from 2 MB, multiplied by however many threads exist.
+  `server.tomcat.threads.max: 20` is the other half of that: 200 threads is meaningless
+  behind 5 database connections and 0.1 CPU. A 50-way burst now settles at 22 HTTP
+  threads instead of spawning 50
+- `TieredStopAtLevel=1` was the surprise. Keeping the JIT at C1 cut startup by 2.4x on a
+  CPU-starved box, because C2 compilation competes for the one thing that is scarce, and
+  took 45 MB with it. The cost is lower steady-state throughput on hot code, which this
+  app does not have — every request's time is spent waiting on Groq
+
+`ExitOnOutOfMemoryError` is there so a heap exhaustion kills the process and the platform
+restarts it. Without it the JVM survives in permanent GC, and a service that is up but
+answering nothing is harder to notice than one that is down.
+
+Verified after the change: no OOM across 300 requests, `OOMKilled=false`, no errors in
+the log, and 155 MB of headroom where the original had the heap alone able to walk past
+the limit.
 
 ---
 
@@ -896,6 +948,10 @@ after deployment, where no such proxy exists.
   requests real, but it also lets model-written code talk to the internet from the
   user's browser — an allow-list of hosts is the shape of the answer, and it is not
   built
+- 512 MB leaves about 155 MB of headroom once the JVM has settled, and nothing watches
+  it. There are no memory metrics and no alert; the way the last limit was found was a
+  platform notice after the fact. Actuator with a metrics endpoint is the small version
+  of the fix
 - Migrations are only ever applied forward. There is no `undo` (that is Flyway's paid
   tier), so a bad migration is fixed by writing the next one
 - No refresh tokens or token revocation, so an expired token means a silent bounce to

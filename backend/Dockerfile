@@ -40,10 +40,32 @@ COPY --from=build --chown=app:app /build/target/lovable-clone-*.jar app.jar
 
 USER app
 
-# JVM container ki memory dekh leta hai, par default heap uska ek chauthai leta hai.
-# 512 MB wale free tier pe woh 128 MB heap hai — Boot + JPA + Flyway + Spring AI usme
-# boot nahi hote. 75% is app ko jagah deta hai aur non-heap ke liye bhi bacha rehta hai
-ENV JAVA_OPTS="-XX:MaxRAMPercentage=75"
+# Heap ke alawa JVM metaspace, code cache, GC ka apna dhaancha aur har thread ka stack bhi
+# leta hai — yeh sab container ki limit mein ginte hain, heap ki limit mein nahi. 75% pe heap
+# akela 384 MB tak ja sakta tha, aur idle RSS hi 345 MB thi: pehli asli request pe container
+# 512 se ooper chala gaya aur Render ne "Out of memory" ke baad service band kar di.
+# 50% pe heap 256 MB, aur baaki sab ke liye 256 MB bachta hai.
+#
+# MaxMetaspaceSize ki koi default seema nahi hoti. Bina chhat ke badhti classes container ko
+# chupchaap maar deti hain; chhat ke saath saaf OutOfMemoryError: Metaspace milti hai.
+#
+# Stack 2 MB se 512 KB. Yeh app deep recursion nahi karti, aur bachat threads ki ginti se
+# guna hoti hai. Threads khud application-prod.yml mein kam ki gayi hain.
+#
+# Heap khatam ho to process ko mar jana chahiye taaki platform use naya shuru kare. Iske bina
+# JVM GC mein ghoomti rehti hai aur service zinda dikhti hai par jawab nahi deti — jo monitoring
+# ke liye crash se badtar haalat hai
+#
+# TieredStopAtLevel=1 JIT ko sirf C1 tak rakhta hai. Free tier pe CPU hi kami hai, aur
+# background compilation usi CPU se hoti hai jispe app boot ho rahi hoti hai: 0.25 CPU wale
+# container mein startup 163s se 67s pe aa gaya aur memory 332 MB se 288 MB (code cache aur
+# compiler threads dono chhote). Startup yahan sirf aaram ki baat nahi — pichhli deploy isliye
+# mari thi ki platform ko port time pe mila hi nahi.
+#
+# Keemat yeh hai ki C2 ka optimised code kabhi nahi banta, to lambe samay ki CPU-heavy
+# throughput kam rehti hai. Is app mein woh matter nahi karta: har request ka waqt Groq ke
+# jawab ka intezar hai, hamare loops nahi
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=50 -XX:MaxMetaspaceSize=128m -Xss512k -XX:TieredStopAtLevel=1 -XX:+ExitOnOutOfMemoryError"
 
 # PORT platform inject karta hai; 8081 local ke liye fallback hai
 ENV PORT=8081
