@@ -17,6 +17,22 @@ server:
       min-spare: 2
 
 spring:
+  main:
+    # Beans tab bante hain jab pehli baar chahiye hote hain, boot pe nahi. Naapa gaya:
+    # idle 294 MB se 259 MB, 300 requests ke baad 357 MB se 319 MB, startup 16.0s se 14.1s.
+    # Bachat load ke baad bhi rehti hai, yaani yeh sirf kaam ko aage khiskana nahi hai —
+    # is app ke kai beans kabhi bante hi nahi.
+    #
+    # Iski keemat yeh hai ki bean banne ki galti boot ke bajaye pehli request pe dikhti hai,
+    # aur deploy ke waqt yeh ulta padta hai: platform health check pass kar deta hai aur toota
+    # hua build live ho jata hai. Isliye yeh sirf prod mein hai — dev mein eager rehna hi behtar
+    # hai, wahan galti likhte waqt hi pakdi jaani chahiye.
+    #
+    # Do sabse khatarnak raaste check kiye gaye aur woh ab bhi fail-fast hain: DataSource aur
+    # Flyway boot pe hi chalte hain, aur bina JWT_SECRET_KEY ke app exit code 1 pe mar jati hai
+    # (JwtAuthFilter ek servlet filter hai, aur uske bina Tomcat start hi nahi hota)
+    lazy-initialization: true
+
   jpa:
     # Dev mein yeh seekhne ke liye on hai, par har query ko log karna production mein
     # do tarah se mehnga hai: I/O, aur logs mein data ka chala jana

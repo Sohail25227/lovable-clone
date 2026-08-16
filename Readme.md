@@ -34,7 +34,7 @@ and takes about a minute. Everything after that is normal speed.
 | 8 | Backend containerised, production profile, image verified end to end | Done |
 | 8b | Deployment config: Render blueprint, Vercel SPA rewrite | Done |
 | 8c | Hosted: Neon Postgres, backend on Render, frontend on Vercel | Done |
-| 8d | JVM tuned to fit 512 MB after a production OOM; startup 2.4x faster | Done |
+| 8d | JVM tuned to fit 512 MB after a production OOM; startup 3x faster | Done |
 | 9+ | File storage (MinIO), RAG (Qdrant), Kubernetes | Planned |
 
 ---
@@ -866,14 +866,14 @@ metaspace (no default ceiling at all), the code cache, and a 2 MB stack for ever
 Tomcat's up-to-200 threads. Idle RSS was already 345 MB with a heap that was mostly
 empty. There was never room for the heap to reach its own ceiling.
 
-Four changes, each measured in that container rather than reasoned about:
+Five changes, each measured in that container rather than reasoned about:
 
 | | before | after |
 | --- | --- | --- |
-| Startup, 0.5 CPU | 46 s | 16 s |
+| Startup, 0.5 CPU | 46 s | 14 s |
 | Startup, 0.25 CPU | 163 s | 67 s |
-| Idle | 345 MB | 294 MB |
-| After 300 authenticated requests | ~400 MB | 357 MB |
+| Idle | 345 MB | 256 MB |
+| After 300 authenticated requests | ~400 MB | 315 MB |
 | Heap ceiling | 384 MB | 256 MB |
 
 - `MaxRAMPercentage=50` puts the heap ceiling at 256 MB and leaves the other 256 MB for
@@ -889,13 +889,29 @@ Four changes, each measured in that container rather than reasoned about:
   CPU-starved box, because C2 compilation competes for the one thing that is scarce, and
   took 45 MB with it. The cost is lower steady-state throughput on hot code, which this
   app does not have — every request's time is spent waiting on Groq
+- `spring.main.lazy-initialization` in the prod profile, worth another 39 MB and 2
+  seconds. The obvious objection is that lazy initialisation only defers the cost, so the
+  saving should evaporate under load — it does not here: 294 MB → 256 MB idle, and
+  357 MB → 315 MB after the same 300 requests. Enough of this context is never touched by
+  a running request to be worth not building
 
 `ExitOnOutOfMemoryError` is there so a heap exhaustion kills the process and the platform
 restarts it. Without it the JVM survives in permanent GC, and a service that is up but
 answering nothing is harder to notice than one that is down.
 
+Lazy initialisation is the one of these with a real downside, which is why it is scoped
+to the prod profile: a bean that fails to build now fails on the first request rather
+than at startup, and a deploy that passes its health check and then breaks is worse than
+one that never goes live. The two paths where that would hurt most were checked rather
+than assumed. Flyway and the `DataSource` still run during startup, so a bad migration or
+an unreachable database stops the deploy. And starting without `JWT_SECRET_KEY` still
+exits `1` with `Could not resolve placeholder`, because `JwtAuthFilter` is a servlet
+filter and Tomcat cannot start without it — the fail-fast promise in `application.yml`
+survives. Development stays eager, where a mistake should surface while it is being
+written.
+
 Verified after the change: no OOM across 300 requests, `OOMKilled=false`, no errors in
-the log, and 155 MB of headroom where the original had the heap alone able to walk past
+the log, and 197 MB of headroom where the original had the heap alone able to walk past
 the limit.
 
 ---
@@ -948,10 +964,15 @@ the limit.
   requests real, but it also lets model-written code talk to the internet from the
   user's browser — an allow-list of hosts is the shape of the answer, and it is not
   built
-- 512 MB leaves about 155 MB of headroom once the JVM has settled, and nothing watches
+- 512 MB leaves about 197 MB of headroom once the JVM has settled, and nothing watches
   it. There are no memory metrics and no alert; the way the last limit was found was a
   platform notice after the fact. Actuator with a metrics endpoint is the small version
   of the fix
+- `findByOwnerId` and `findByProjectIdOrderByIdAsc` return unbounded lists, so a user with
+  thousands of projects, or a project with a long history, loads all of it into memory as
+  entities, then DTOs, then JSON — three copies in one request. The model's context window
+  is already capped with `Limit`; the read paths are not. Pagination is the fix, and it is
+  the reason memory can still grow with data even after the tuning above
 - Migrations are only ever applied forward. There is no `undo` (that is Flyway's paid
   tier), so a bad migration is fixed by writing the next one
 - No refresh tokens or token revocation, so an expired token means a silent bounce to
