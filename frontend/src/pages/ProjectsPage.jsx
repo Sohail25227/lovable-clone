@@ -2,7 +2,16 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { useAuth } from '../auth/authContext'
-import { Button, ErrorNote, Field, Spinner, StatusBadge } from '../components/ui'
+import {
+  Button,
+  COLD_START_NOTICE,
+  ErrorNote,
+  Field,
+  Spinner,
+  StatusBadge,
+  Wordmark,
+  useSlowRequest,
+} from '../components/ui'
 
 export default function ProjectsPage() {
   const { logout } = useAuth()
@@ -10,6 +19,10 @@ export default function ProjectsPage() {
   const [name, setName] = useState('')
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
+
+  // Token localStorage mein bacha rehta hai, to laut kar aane wala user login skip kar
+  // deta hai aur soye hue server se pehli takkar yahan hoti hai
+  const waking = useSlowRequest(projects === null && !error)
 
   const load = useCallback(async () => {
     try {
@@ -53,7 +66,9 @@ export default function ProjectsPage() {
   return (
     <div className="mx-auto max-w-3xl p-6">
       <header className="mb-8 flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-slate-100">Your projects</h1>
+        <h1>
+          <Wordmark className="text-2xl" />
+        </h1>
         <Button variant="ghost" onClick={logout}>
           Log out
         </Button>
@@ -79,8 +94,13 @@ export default function ProjectsPage() {
         <ErrorNote error={error} />
       </div>
 
+      <h2 className="mb-3 text-sm font-medium text-slate-400">Your projects</h2>
+
       {projects === null ? (
-        <Spinner label="Loading projects…" />
+        // Load fail hone par spinner jhooth bolta hai — woh "ho raha hai" dikhata rehta hai
+        // jabki koshish error ke saath khatam ho chuki hai. Us haalat mein ErrorNote hi kaafi
+        // hai, aur uske neeche ghoomta spinner sirf user ko intezar karwata hai
+        !error && <Spinner label={waking ? COLD_START_NOTICE : 'Loading projects…'} />
       ) : projects.length === 0 ? (
         <p className="text-sm text-slate-500">No projects yet. Create one above to start building.</p>
       ) : (

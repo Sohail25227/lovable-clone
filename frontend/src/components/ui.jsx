@@ -1,3 +1,45 @@
+import { useEffect, useState } from 'react'
+
+// Free tier ka backend 15 minute bina traffic ke so jata hai, aur use jagane wali pehli
+// request ~50 second leti hai. Yeh wording do jagah chahiye, isliye ek hi jagah likhi hai
+export const COLD_START_NOTICE = 'Waking the server, free hosting takes up to a minute'
+
+/**
+ * `active` shuru hone ke `delayMs` baad true hota hai, aur `active` khatam hote hi false.
+ *
+ * Turant bata dena galat hota: jagi hui server pe login pal bhar ka kaam hai, aur us par
+ * "server jaga rahe hain" likhna jhooth bhi hai aur app ko dheema bhi dikhata hai. Yeh sirf
+ * tab bolta hai jab intezar itna lamba ho jaye ki uski wajah batani zaroori ho — warna
+ * screen tooti hui lagti hai aur pehli baar aane wala tab band kar deta hai.
+ */
+export function useSlowRequest(active, delayMs = 4000) {
+  const [slow, setSlow] = useState(false)
+
+  useEffect(() => {
+    if (!active) {
+      setSlow(false)
+      return
+    }
+
+    const timer = setTimeout(() => setSlow(true), delayMs)
+    return () => clearTimeout(timer)
+  }, [active, delayMs])
+
+  return slow
+}
+
+// Ek hi jagah, kyunki yeh do screens par hai. Size bahar se aata hai: login par yeh app ka
+// naam hai aur bada hona chahiye, andar ki screens par sirf ek nishani hai
+export function Wordmark({ className = '' }) {
+  return (
+    <span
+      className={`bg-gradient-to-r from-indigo-400 via-violet-400 to-fuchsia-400 bg-clip-text font-semibold tracking-tight text-transparent ${className}`}
+    >
+      AI Builder
+    </span>
+  )
+}
+
 const STATUS_STYLES = {
   DRAFT: 'bg-slate-700/60 text-slate-300',
   GENERATING: 'bg-amber-500/15 text-amber-300',
